@@ -4,7 +4,7 @@ Bounds the time of each execution. When the budget is exceeded, the context's
 `AbortSignal` aborts and the call rejects with a typed [`TimeoutError`](errors.md).
 
 ```ts
-import { timeout } from '@pinceladasdaweb/breakwater'
+import { timeout } from 'breakwater'
 
 const policy = timeout(2_000)
 

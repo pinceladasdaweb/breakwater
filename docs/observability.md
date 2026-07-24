@@ -87,7 +87,7 @@ app.get('/health/circuits', (_req, res) => {
 Implement only what you care about; every method is optional:
 
 ```ts
-import type { MetricsCollector } from '@pinceladasdaweb/breakwater'
+import type { MetricsCollector } from 'breakwater'
 
 const collector: MetricsCollector = {
   onExecution ({ policy, name, outcome, durationMs }) {
@@ -113,7 +113,7 @@ const policy = resilience({
 })
 ```
 
-Ready-made `@pinceladasdaweb/breakwater/prometheus` and `/otel` entry points
+Ready-made `breakwater/prometheus` and `/otel` entry points
 implementing this interface are planned — the core will never import
 `prom-client` or OpenTelemetry itself.
 

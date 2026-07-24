@@ -9,7 +9,7 @@ whole point.
 ## `compose()` — order is the nesting, literally
 
 ```ts
-import { compose, fallback, retry, circuitBreaker, timeout } from '@pinceladasdaweb/breakwater'
+import { compose, fallback, retry, circuitBreaker, timeout } from 'breakwater'
 
 const policy = compose(
   fallback(stale),          // ← outermost: runs "around" everything below
@@ -146,7 +146,7 @@ reason for: fallback outside, timeout inside.
 For the 90% case, skip the decisions:
 
 ```ts
-import { resilience, exponential } from '@pinceladasdaweb/breakwater'
+import { resilience, exponential } from 'breakwater'
 
 const policy = resilience({
   retry: { attempts: 3, backoff: exponential({ initial: 200 }) },
@@ -175,7 +175,7 @@ participates in composition. The `invoke(fn, ctx)` method is the composition
 primitive — it runs under an *existing* context instead of creating one:
 
 ```ts
-import { basePolicy, type Policy } from '@pinceladasdaweb/breakwater'
+import { basePolicy, type Policy } from 'breakwater'
 
 function logging (log: Logger): Policy {
   return basePolicy(async (fn, ctx) => {

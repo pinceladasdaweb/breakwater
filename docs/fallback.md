@@ -6,7 +6,7 @@ gave up and the circuit is open, fallback decides what the caller sees instead
 of an exception.
 
 ```ts
-import { fallback } from '@pinceladasdaweb/breakwater'
+import { fallback } from 'breakwater'
 
 const policy = fallback((error, ctx) => cache.get(cacheKey) ?? DEFAULT_RESPONSE)
 
@@ -82,7 +82,7 @@ The classic pairing with the circuit breaker — serve the last known good
 response while the dependency is down:
 
 ```ts
-import { compose, fallback, circuitBreaker, isCircuitOpenError } from '@pinceladasdaweb/breakwater'
+import { compose, fallback, circuitBreaker, isCircuitOpenError } from 'breakwater'
 
 const lastGood = new Map<string, unknown>()
 

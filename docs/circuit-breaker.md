@@ -7,7 +7,7 @@ stops burning threads, sockets and latency on a dependency that cannot answer,
 and the dependency gets room to breathe.
 
 ```ts
-import { circuitBreaker } from '@pinceladasdaweb/breakwater'
+import { circuitBreaker } from 'breakwater'
 
 const breaker = circuitBreaker({
   name: 'payments-api',
@@ -79,7 +79,7 @@ circuitBreaker(options?: CircuitBreakerOptions): CircuitBreakerPolicy
 ### `window`: count vs time
 
 ```ts
-import { countWindow, timeWindow } from '@pinceladasdaweb/breakwater'
+import { countWindow, timeWindow } from 'breakwater'
 
 circuitBreaker({ window: countWindow(100) })   // rate over the last 100 calls
 circuitBreaker({ window: timeWindow(60_000) }) // rate over the last 60 seconds
@@ -162,7 +162,7 @@ upcoming Redis store will let N instances of your service agree that an
 endpoint is down (only one instance probes it, the rest wait):
 
 ```ts
-import { memoryStore, countWindow } from '@pinceladasdaweb/breakwater'
+import { memoryStore, countWindow } from 'breakwater'
 
 // Today: share a circuit between two breakers in the same process
 const store = memoryStore({ window: countWindow(50) })

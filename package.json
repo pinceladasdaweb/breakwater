@@ -1,5 +1,5 @@
 {
-  "name": "@pinceladasdaweb/breakwater",
+  "name": "breakwater",
   "version": "0.1.0",
   "description": "Resilience toolkit for Node.js — retry, circuit breaker, timeout, and policy composition with first-class observability.",
   "type": "module",

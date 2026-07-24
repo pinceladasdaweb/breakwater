@@ -3,7 +3,7 @@
 > **Resilience toolkit for Node.js** — retry, circuit breaker, timeout, fallback, and policy composition with first-class observability.
 
 [![CI](https://github.com/pinceladasdaweb/breakwater/actions/workflows/ci.yml/badge.svg)](https://github.com/pinceladasdaweb/breakwater/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/npm/v/@pinceladasdaweb/breakwater.svg)](https://www.npmjs.com/package/@pinceladasdaweb/breakwater)
+[![npm version](https://img.shields.io/npm/v/breakwater.svg)](https://www.npmjs.com/package/breakwater)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 > ⚠️ **Work in progress** — the public API is being built towards `1.0.0` and may change without notice until then.
@@ -11,7 +11,7 @@
 When waves of failure hit, the breakwater keeps your service standing. It brings the design of [resilience4j](https://resilience4j.readme.io/) (Java) and [Polly](https://github.com/App-vNext/Polly) (.NET) to Node.js: composable resilience policies with explicit ordering, typed events, and metrics — no third-party plugins required.
 
 ```ts
-import { resilience, exponential } from '@pinceladasdaweb/breakwater'
+import { resilience, exponential } from 'breakwater'
 
 const payments = resilience({
   retry: { attempts: 3, backoff: exponential({ initial: 200 }) },
@@ -61,14 +61,14 @@ Design principles:
 ## Install
 
 ```bash
-npm install @pinceladasdaweb/breakwater
+npm install breakwater
 ```
 
 Works with both module systems:
 
 ```ts
-import { retry, timeout, circuitBreaker } from '@pinceladasdaweb/breakwater' // ESM
-const { retry, timeout, circuitBreaker } = require('@pinceladasdaweb/breakwater') // CJS
+import { retry, timeout, circuitBreaker } from 'breakwater' // ESM
+const { retry, timeout, circuitBreaker } = require('breakwater') // CJS
 ```
 
 ## Quick start
@@ -76,7 +76,7 @@ const { retry, timeout, circuitBreaker } = require('@pinceladasdaweb/breakwater'
 Protect a flaky HTTP call in three lines:
 
 ```ts
-import { retry } from '@pinceladasdaweb/breakwater'
+import { retry } from 'breakwater'
 
 const policy = retry({ attempts: 3 })
 const user = await policy.execute(() => fetchUser(id))
@@ -85,7 +85,7 @@ const user = await policy.execute(() => fetchUser(id))
 Add a time budget and a circuit breaker, composed in an explicit order:
 
 ```ts
-import { compose, retry, circuitBreaker, timeout } from '@pinceladasdaweb/breakwater'
+import { compose, retry, circuitBreaker, timeout } from 'breakwater'
 
 const policy = compose(
   retry({ attempts: 3 }),                      // outermost
@@ -99,7 +99,7 @@ const user = await policy.execute(({ signal }) => fetchUser(id, { signal }))
 Or let `resilience()` pick the battle-tested default order for you:
 
 ```ts
-import { resilience } from '@pinceladasdaweb/breakwater'
+import { resilience } from 'breakwater'
 
 const policy = resilience({
   retry: { attempts: 3 },
@@ -238,7 +238,7 @@ Every error breakwater throws extends `BreakwaterError` and carries a stable
 | `FallbackFailedError` | `FALLBACK_FAILED` | fallback (operation error in `originalError`) |
 
 ```ts
-import { isCircuitOpenError, isTimeoutError } from '@pinceladasdaweb/breakwater'
+import { isCircuitOpenError, isTimeoutError } from 'breakwater'
 
 try {
   await policy.execute(chargeCard)

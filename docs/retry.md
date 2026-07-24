@@ -4,7 +4,7 @@ Retries transient failures with a configurable delay strategy, a total time
 budget, and full `AbortSignal` support.
 
 ```ts
-import { retry, exponential } from '@pinceladasdaweb/breakwater'
+import { retry, exponential } from 'breakwater'
 
 const policy = retry({
   attempts: 4,
@@ -51,7 +51,7 @@ All strategies are pure functions `(attempt: number) => delayMs`, exported and
 testable on their own. `attempt` is 1-based (the attempt that just failed).
 
 ```ts
-import { fixed, linear, exponential } from '@pinceladasdaweb/breakwater'
+import { fixed, linear, exponential } from 'breakwater'
 
 fixed(200)                                        // 200, 200, 200, ...
 linear({ initial: 100, increment: 200, max: 2_000 }) // 100, 300, 500, ..., 2000

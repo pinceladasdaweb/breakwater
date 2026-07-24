@@ -12,7 +12,7 @@ import {
   isIsolatedError,
   isRetryExhaustedError,
   isFallbackFailedError
-} from '@pinceladasdaweb/breakwater'
+} from 'breakwater'
 ```
 
 ## The hierarchy
@@ -36,7 +36,7 @@ out of the box: the moment the circuit opens, retrying stops.
 Your own error classes can opt in to the same convention:
 
 ```ts
-import { BreakwaterError } from '@pinceladasdaweb/breakwater'
+import { BreakwaterError } from 'breakwater'
 
 class QuotaExceededError extends BreakwaterError {
   constructor () {
