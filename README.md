@@ -1,0 +1,270 @@
+# breakwater
+
+> **Resilience toolkit for Node.js** — retry, circuit breaker, timeout, fallback, and policy composition with first-class observability.
+
+[![CI](https://github.com/pinceladasdaweb/breakwater/actions/workflows/ci.yml/badge.svg)](https://github.com/pinceladasdaweb/breakwater/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/@pinceladasdaweb/breakwater.svg)](https://www.npmjs.com/package/@pinceladasdaweb/breakwater)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+> ⚠️ **Work in progress** — the public API is being built towards `1.0.0` and may change without notice until then.
+
+When waves of failure hit, the breakwater keeps your service standing. It brings the design of [resilience4j](https://resilience4j.readme.io/) (Java) and [Polly](https://github.com/App-vNext/Polly) (.NET) to Node.js: composable resilience policies with explicit ordering, typed events, and metrics — no third-party plugins required.
+
+```ts
+import { resilience, exponential } from '@pinceladasdaweb/breakwater'
+
+const payments = resilience({
+  retry: { attempts: 3, backoff: exponential({ initial: 200 }) },
+  circuitBreaker: { name: 'payments-api', failureThreshold: 0.5 },
+  timeout: 2_000,
+  fallback: () => ({ status: 'pending', queued: true })
+})
+
+const charge = await payments.execute(({ signal }) => api.post('/charge', body, { signal }))
+```
+
+## Table of contents
+
+- [Why another resilience library?](#why-another-resilience-library)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Core concepts](#core-concepts)
+- [The policies](#the-policies)
+- [Composing policies](#composing-policies)
+- [Observability](#observability)
+- [Errors](#errors)
+- [Documentation](#documentation)
+- [Requirements](#requirements)
+
+## Why another resilience library?
+
+| | breakwater | [opossum](https://github.com/nodeshift/opossum) | [cockatiel](https://github.com/connor4312/cockatiel) |
+|---|---|---|---|
+| Circuit breaker | ✅ | ✅ | ✅ |
+| Retry with backoff strategies | ✅ | ➖ rudimentary | ✅ |
+| Timeout / fallback | ✅ | ➖ fallback only | ✅ |
+| Bulkhead / rate limiter | 🔜 planned | ❌ | ✅ bulkhead |
+| Policy composition with explicit ordering | ✅ first-class | ❌ | ✅ |
+| Typed events + pluggable metrics collector | ✅ native | ➖ via plugin | ❌ |
+| Prometheus / OpenTelemetry adapters | 🔜 planned | ➖ via plugin | ❌ |
+| Distributed circuit breaker state (Redis) | 🔜 planned | ❌ | ❌ |
+| TypeScript | ✅ native | ➖ via `@types` | ✅ native |
+| Runtime dependencies | **0** | 0 | 0 |
+
+Design principles:
+
+- **TypeScript first** — strict types, no `@types` package
+- **Zero dependencies in the core** — integrations (Redis, Prometheus, OTel) will ship as optional entry points
+- **Declarative composition** — policies combine into pipelines with explicit, documented ordering
+- **Native observability** — typed events and a pluggable `MetricsCollector` in the core
+
+## Install
+
+```bash
+npm install @pinceladasdaweb/breakwater
+```
+
+Works with both module systems:
+
+```ts
+import { retry, timeout, circuitBreaker } from '@pinceladasdaweb/breakwater' // ESM
+const { retry, timeout, circuitBreaker } = require('@pinceladasdaweb/breakwater') // CJS
+```
+
+## Quick start
+
+Protect a flaky HTTP call in three lines:
+
+```ts
+import { retry } from '@pinceladasdaweb/breakwater'
+
+const policy = retry({ attempts: 3 })
+const user = await policy.execute(() => fetchUser(id))
+```
+
+Add a time budget and a circuit breaker, composed in an explicit order:
+
+```ts
+import { compose, retry, circuitBreaker, timeout } from '@pinceladasdaweb/breakwater'
+
+const policy = compose(
+  retry({ attempts: 3 }),                      // outermost
+  circuitBreaker({ name: 'user-service' }),
+  timeout(2_000)                               // innermost, hugs the function
+)
+
+const user = await policy.execute(({ signal }) => fetchUser(id, { signal }))
+```
+
+Or let `resilience()` pick the battle-tested default order for you:
+
+```ts
+import { resilience } from '@pinceladasdaweb/breakwater'
+
+const policy = resilience({
+  retry: { attempts: 3 },
+  circuitBreaker: { name: 'user-service' },
+  timeout: 2_000,
+  fallback: cachedUser
+})
+```
+
+## Core concepts
+
+### Every policy speaks the same contract
+
+A policy — and the result of composing policies — is an object with:
+
+```ts
+policy.execute(fn, options?)  // run fn under the policy's protection
+policy.wrap(fn)               // decorate: same signature in, protected function out
+policy.invoke(fn, ctx)        // composition primitive (used by compose())
+```
+
+Two everyday shapes:
+
+```ts
+// 1. execute — fn receives the execution context (with the combined signal)
+const data = await policy.execute(({ signal }) => fetch(url, { signal }))
+
+// 2. wrap — decorate once, call everywhere
+const safeFetchUser = policy.wrap(fetchUser)
+const user = await safeFetchUser(id)
+```
+
+> `wrap` keeps the function signature untouched, so the wrapped function does not
+> receive the context. Use `execute` when you need the inner signal. Also note
+> `this` is not forwarded — bind methods first: `policy.wrap(svc.method.bind(svc))`.
+
+### The execution context
+
+One context travels through the whole pipeline:
+
+```ts
+interface ExecutionContext {
+  signal: AbortSignal    // external cancellation + timeouts, combined into ONE signal
+  attempt: number        // 0 on the first execution; incremented by retry
+  correlationId: string  // generated if not provided; present in every event payload
+  metadata: Record<string, unknown>  // yours, crosses every policy
+}
+```
+
+Your function only ever needs to observe **one** `AbortSignal` — the policies
+combine external cancellation, timeouts and retry cancellation into it:
+
+```ts
+await policy.execute(
+  ({ signal }) => fetch(url, { signal }),
+  { signal: request.signal, correlationId: request.id }
+)
+```
+
+### Cancellation is not failure
+
+Aborting via `AbortSignal` is treated as *cancellation* everywhere: retry does not
+retry it, the circuit breaker does not count it, and fallback does not replace it.
+The abort reason propagates to the caller untouched.
+
+## The policies
+
+| Policy | One-liner | Docs |
+|---|---|---|
+| [`timeout(ms, options?)`](docs/timeout.md) | Bound the time of each execution, cooperatively or aggressively | [docs/timeout.md](docs/timeout.md) |
+| [`retry(options?)`](docs/retry.md) | Retry transient failures with configurable backoff and a total deadline | [docs/retry.md](docs/retry.md) |
+| [`circuitBreaker(options?)`](docs/circuit-breaker.md) | Fail fast while a dependency is down; probe and recover automatically | [docs/circuit-breaker.md](docs/circuit-breaker.md) |
+| [`fallback(handler, options?)`](docs/fallback.md) | Replace a failure with a value, a function result, or a chain of them | [docs/fallback.md](docs/fallback.md) |
+| [`compose(...policies)`](docs/composition.md) | Combine policies with explicit ordering; compositions compose again | [docs/composition.md](docs/composition.md) |
+| [`resilience(options)`](docs/composition.md#resilience-the-batteries-included-order) | The batteries-included pipeline with a sane default order | [docs/composition.md](docs/composition.md) |
+
+## Composing policies
+
+`compose(a, b, c)` runs exactly like the nested calls `a(b(c(fn)))` — the first
+policy is the outermost. **Order changes behavior**: retry outside the circuit
+breaker behaves very differently from retry inside it. This is the part most
+libraries leave undocumented; we document it with diagrams in
+[docs/composition.md](docs/composition.md).
+
+The default order used by `resilience()`:
+
+```
+fallback( retry( circuitBreaker( timeout( fn ) ) ) )
+```
+
+Every attempt flows through the breaker (feeding its stats individually), and once
+the circuit opens, retry sees `CircuitOpenError` — which is not retryable — and
+gives up immediately instead of hammering an open circuit.
+
+## Observability
+
+Every policy emits **typed events** — no plugin required:
+
+```ts
+const breaker = circuitBreaker({ name: 'payments-api' })
+
+breaker
+  .on('stateChange', ({ from, to, stats }) => log.warn({ from, to, stats }, 'circuit state changed'))
+  .on('reject', ({ correlationId }) => log.debug({ correlationId }, 'request rejected fast'))
+
+breaker.stats()
+// { state, successes, failures, totalCalls, failureRate, lastError, openedAt, nextAttemptAt }
+```
+
+For metrics pipelines, implement the `MetricsCollector` interface once and plug it
+into `resilience()` — it wires every policy for you:
+
+```ts
+const policy = resilience({
+  retry: { attempts: 3 },
+  circuitBreaker: { name: 'payments-api' },
+  timeout: 2_000,
+  metrics: myCollector // onExecution, onRetry, onTimeout, onStateChange, onFallback, onReject
+})
+```
+
+Prometheus and OpenTelemetry adapters implementing this interface are planned as
+optional entry points. See [docs/observability.md](docs/observability.md).
+
+## Errors
+
+Every error breakwater throws extends `BreakwaterError` and carries a stable
+`code` — branch on the code or the type guards, never on messages:
+
+| Error | `code` | Thrown by |
+|---|---|---|
+| `TimeoutError` | `TIMEOUT` | timeout |
+| `RetryExhaustedError` | `RETRY_EXHAUSTED` | retry (last error in `cause`) |
+| `CircuitOpenError` | `CIRCUIT_OPEN` | circuit breaker (carries `stats`) |
+| `IsolatedError` | `CIRCUIT_ISOLATED` | circuit breaker (manual isolation) |
+| `FallbackFailedError` | `FALLBACK_FAILED` | fallback (operation error in `originalError`) |
+
+```ts
+import { isCircuitOpenError, isTimeoutError } from '@pinceladasdaweb/breakwater'
+
+try {
+  await policy.execute(chargeCard)
+} catch (error) {
+  if (isCircuitOpenError(error)) return res.status(503).json({ retryAfter: error.stats.nextAttemptAt })
+  if (isTimeoutError(error)) return res.status(504).end()
+  throw error
+}
+```
+
+See [docs/errors.md](docs/errors.md).
+
+## Documentation
+
+- [Timeout](docs/timeout.md)
+- [Retry & backoff](docs/retry.md)
+- [Circuit breaker](docs/circuit-breaker.md)
+- [Fallback](docs/fallback.md)
+- [Composition & ordering](docs/composition.md) — read this one; ordering is where resilience goes right or wrong
+- [Observability: events, stats & metrics](docs/observability.md)
+- [Errors](docs/errors.md)
+
+## Requirements
+
+- Node.js >= 22
+
+## License
+
+[MIT](LICENSE)

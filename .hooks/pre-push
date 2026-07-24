@@ -1,0 +1,21 @@
+#!/bin/bash
+LOCAL_BRANCH_NAME="$(git rev-parse --abbrev-ref HEAD)"
+BYPASS_BRANCHES=('main' 'master' 'development')
+for branch in "${BYPASS_BRANCHES[@]}"; do
+    if [ "$LOCAL_BRANCH_NAME" = "$branch" ]; then
+        exit 0
+    fi
+done
+ALLOWED_PREFIXES=('feature' 'feat' 'hotfix' 'fix')
+VALID_PREFIX_PATTERN="^($(IFS='|'; echo "${ALLOWED_PREFIXES[*]}"))\/.+$"
+if ! [[ $LOCAL_BRANCH_NAME =~ $VALID_PREFIX_PATTERN ]]; then
+    echo -e "\033[31mERROR\033[0m Invalid branch name prefix."
+    echo "Branch names must start with one of: ${ALLOWED_PREFIXES[*]}"
+    echo "Current branch name: $LOCAL_BRANCH_NAME"
+    echo "Example of a valid branch name: feature/your-feature-name"
+    echo "To rename your current branch, use:"
+    echo "git branch -m $LOCAL_BRANCH_NAME <prefix>/$LOCAL_BRANCH_NAME"
+    echo "Replace <prefix> with one of: ${ALLOWED_PREFIXES[*]}"
+    exit 1
+fi
+exit 0

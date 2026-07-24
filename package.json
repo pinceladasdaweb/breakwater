@@ -1,0 +1,83 @@
+{
+  "name": "@pinceladasdaweb/breakwater",
+  "version": "0.1.0",
+  "description": "Resilience toolkit for Node.js — retry, circuit breaker, timeout, and policy composition with first-class observability.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "rollup -c rollup.config.mjs && cp dist/index.d.ts dist/index.d.cts",
+    "hooks": "git config core.hooksPath .hooks",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "prepack": "npm run build",
+    "test": "node --import tsx --test 'tests/**/*.test.ts'",
+    "test:coverage": "node --import tsx --experimental-test-coverage --test 'tests/**/*.test.ts'",
+    "check:types": "tsc --noEmit"
+  },
+  "keywords": [
+    "resilience",
+    "circuit-breaker",
+    "retry",
+    "timeout",
+    "fallback",
+    "backoff",
+    "policy",
+    "fault-tolerance",
+    "resilience4j",
+    "observability"
+  ],
+  "author": "Pedro Rogério",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pinceladasdaweb/breakwater.git"
+  },
+  "bugs": {
+    "url": "https://github.com/pinceladasdaweb/breakwater/issues"
+  },
+  "homepage": "https://github.com/pinceladasdaweb/breakwater#readme",
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^21.2.1",
+    "@commitlint/config-conventional": "^21.2.0",
+    "@rollup/plugin-typescript": "^12.3.0",
+    "@types/node": "^26.1.1",
+    "eslint": "^9.39.5",
+    "lint-staged": "^17.2.0",
+    "neostandard": "^0.13.0",
+    "rollup": "^4.62.2",
+    "rollup-plugin-dts": "^6.4.1",
+    "tslib": "^2.8.1",
+    "tsx": "^4.23.1",
+    "typescript": "^5.9.3"
+  },
+  "lint-staged": {
+    "src/**/*.ts": "eslint",
+    "tests/**/*.ts": "eslint"
+  }
+}
