@@ -43,7 +43,8 @@ const charge = await payments.execute(({ signal }) => api.post('/charge', body, 
 | Circuit breaker | ✅ | ✅ | ✅ |
 | Retry with backoff strategies | ✅ | ➖ rudimentary | ✅ |
 | Timeout / fallback | ✅ | ➖ fallback only | ✅ |
-| Bulkhead / rate limiter | 🔜 planned | ❌ | ✅ bulkhead |
+| Bulkhead | ✅ | ❌ | ✅ |
+| Rate limiter | 🔜 planned | ❌ | ❌ |
 | Policy composition with explicit ordering | ✅ first-class | ❌ | ✅ |
 | Typed events + pluggable metrics collector | ✅ native | ➖ via plugin | ❌ |
 | Prometheus / OpenTelemetry adapters | 🔜 planned | ➖ via plugin | ❌ |
@@ -172,6 +173,7 @@ The abort reason propagates to the caller untouched.
 | [`timeout(ms, options?)`](docs/timeout.md) | Bound the time of each execution, cooperatively or aggressively | [docs/timeout.md](docs/timeout.md) |
 | [`retry(options?)`](docs/retry.md) | Retry transient failures with configurable backoff and a total deadline | [docs/retry.md](docs/retry.md) |
 | [`circuitBreaker(options?)`](docs/circuit-breaker.md) | Fail fast while a dependency is down; probe and recover automatically | [docs/circuit-breaker.md](docs/circuit-breaker.md) |
+| [`bulkhead(options?)`](docs/bulkhead.md) | Bound concurrent executions, with an optional FIFO wait queue | [docs/bulkhead.md](docs/bulkhead.md) |
 | [`fallback(handler, options?)`](docs/fallback.md) | Replace a failure with a value, a function result, or a chain of them | [docs/fallback.md](docs/fallback.md) |
 | [`compose(...policies)`](docs/composition.md) | Combine policies with explicit ordering; compositions compose again | [docs/composition.md](docs/composition.md) |
 | [`resilience(options)`](docs/composition.md#resilience-the-batteries-included-order) | The batteries-included pipeline with a sane default order | [docs/composition.md](docs/composition.md) |
@@ -187,7 +189,7 @@ libraries leave undocumented; we document it with diagrams in
 The default order used by `resilience()`:
 
 ```
-fallback( retry( circuitBreaker( timeout( fn ) ) ) )
+fallback( retry( bulkhead( circuitBreaker( timeout( fn ) ) ) ) )
 ```
 
 Every attempt flows through the breaker (feeding its stats individually), and once
@@ -235,6 +237,7 @@ Every error breakwater throws extends `BreakwaterError` and carries a stable
 | `RetryExhaustedError` | `RETRY_EXHAUSTED` | retry (last error in `cause`) |
 | `CircuitOpenError` | `CIRCUIT_OPEN` | circuit breaker (carries `stats`) |
 | `IsolatedError` | `CIRCUIT_ISOLATED` | circuit breaker (manual isolation) |
+| `BulkheadRejectedError` | `BULKHEAD_REJECTED` | bulkhead (carries `stats`; stays retryable) |
 | `FallbackFailedError` | `FALLBACK_FAILED` | fallback (operation error in `originalError`) |
 
 ```ts
@@ -256,6 +259,7 @@ See [docs/errors.md](docs/errors.md).
 - [Timeout](docs/timeout.md)
 - [Retry & backoff](docs/retry.md)
 - [Circuit breaker](docs/circuit-breaker.md)
+- [Bulkhead](docs/bulkhead.md)
 - [Fallback](docs/fallback.md)
 - [Composition & ordering](docs/composition.md) — read this one; ordering is where resilience goes right or wrong
 - [Observability: events, stats & metrics](docs/observability.md)

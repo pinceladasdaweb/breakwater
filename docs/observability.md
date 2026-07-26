@@ -38,6 +38,7 @@ The full event catalog:
 | circuit breaker | `open` / `close` / `halfOpen` | `{ stats, correlationId? }` |
 | circuit breaker | `reject` | `{ reason, correlationId }` |
 | circuit breaker | `success` / `failure` | `{ durationMs, correlationId }` (+ `error` on failure) |
+| bulkhead | `reject` | `{ stats, correlationId }` |
 | fallback | `fallback` | `{ error, handlerIndex, correlationId }` |
 
 Guarantees:

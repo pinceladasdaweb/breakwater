@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { resilience } from '../src/compose/resilience'
 import { fixed } from '../src/retry/backoff'
 import { type MetricsCollector } from '../src/metrics/collector'
-import { isRetryExhaustedError, isTimeoutError } from '../src/errors'
+import { isBulkheadRejectedError, isRetryExhaustedError, isTimeoutError } from '../src/errors'
 import { drain } from './helpers'
 
 describe('resilience()', () => {
@@ -86,6 +86,26 @@ describe('resilience()', () => {
       isRetryExhaustedError
     )
     assert.deepEqual(outcomes, ['failure'])
+  })
+
+  test('bulkhead slots in outside the breaker and reports rejections to metrics', async () => {
+    const rejections: string[] = []
+    const policy = resilience({
+      bulkhead: { concurrency: 1 },
+      circuitBreaker: { consecutiveFailures: 10, name: 'guarded' },
+      metrics: { onReject: (e) => rejections.push(`${e.policy}:${e.reason}`) }
+    })
+
+    let release: (() => void) = () => {}
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const slow = policy.execute(async () => { await gate; return 'slow' })
+    for (let i = 0; i < 10; i++) await Promise.resolve()
+
+    await assert.rejects(policy.execute(() => 'overflow'), isBulkheadRejectedError)
+    assert.deepEqual(rejections, ['bulkhead:bulkhead_full'])
+
+    release()
+    assert.equal(await slow, 'slow')
   })
 
   test('fallbackOptions.fallbackIf is honored', async () => {
