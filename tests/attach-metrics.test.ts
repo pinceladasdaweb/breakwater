@@ -124,12 +124,18 @@ describe('attachMetrics()', () => {
 })
 
 describe('metricsPolicy()', () => {
-  test('a throwing collector never changes the execution outcome', async () => {
+  test('a throwing collector never changes the execution outcome (and is reported)', async (t) => {
+    // Silence the intentional report and assert it happened instead of
+    // letting the stack trace pollute the test output.
+    const reported = t.mock.method(console, 'error', () => {})
     const throwing = { onExecution: () => { throw new Error('collector boom') } }
     const policy = metricsPolicy(throwing)
 
     assert.equal(await policy.execute(() => 'the result survives'), 'the result survives')
     await assert.rejects(policy.execute(() => { throw new Error('original error') }), /original error/)
+
+    assert.equal(reported.mock.callCount(), 2)
+    assert.match(String(reported.mock.calls[0]?.arguments[0]), /metrics collector threw/)
   })
 
   test('reports success and failure with total pipeline duration', async () => {
