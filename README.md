@@ -46,6 +46,7 @@ const charge = await payments.execute(({ signal }) => api.post('/charge', body, 
 | Bulkhead | ✅ | ❌ | ✅ |
 | Rate limiter (token bucket / sliding window) | ✅ | ❌ | ❌ |
 | Policy composition with explicit ordering | ✅ first-class | ❌ | ✅ |
+| Named policy registry (central config) | ✅ | ❌ | ❌ |
 | Typed events + pluggable metrics collector | ✅ native | ➖ via plugin | ❌ |
 | Prometheus / OpenTelemetry adapters | 🔜 planned | ➖ via plugin | ❌ |
 | Distributed circuit breaker state (Redis) | 🔜 planned | ❌ | ❌ |
@@ -197,6 +198,29 @@ Every attempt flows through the breaker (feeding its stats individually), and on
 the circuit opens, retry sees `CircuitOpenError` — which is not retryable — and
 gives up immediately instead of hammering an open circuit.
 
+## Named policies
+
+Define your resilience configuration once, at startup; ask for policies by
+name everywhere else — same name, same instance, genuinely shared state:
+
+```ts
+import { policies } from 'breakwater'
+
+// config/resilience.ts
+policies.define('payments-api', {
+  retry: { attempts: 3 },
+  circuitBreaker: { failureThreshold: 0.5 },
+  timeout: 2_000
+})
+
+// anywhere else
+await policies.get('payments-api').execute(({ signal }) => api.post('/charge', body, { signal }))
+```
+
+Typos fail fast (`get` throws listing the defined names), duplicates throw,
+and the registry name flows into metrics automatically. See
+[docs/named-policies.md](docs/named-policies.md).
+
 ## Observability
 
 Every policy emits **typed events** — no plugin required:
@@ -265,6 +289,7 @@ See [docs/errors.md](docs/errors.md).
 - [Rate limit](docs/rate-limit.md)
 - [Fallback](docs/fallback.md)
 - [Composition & ordering](docs/composition.md) — read this one; ordering is where resilience goes right or wrong
+- [Named policies](docs/named-policies.md)
 - [Observability: events, stats & metrics](docs/observability.md)
 - [Errors](docs/errors.md)
 

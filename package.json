@@ -79,5 +79,6 @@
   "lint-staged": {
     "src/**/*.ts": "eslint",
     "tests/**/*.ts": "eslint"
-  }
+  },
+  "sideEffects": false
 }
