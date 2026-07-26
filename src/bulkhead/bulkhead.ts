@@ -29,6 +29,7 @@ export interface BulkheadEvents extends Record<string, unknown> {
 }
 
 export interface BulkheadPolicy extends Policy, Observable<BulkheadEvents> {
+  readonly kind: 'bulkhead'
   stats: () => BulkheadStats
 }
 
@@ -112,6 +113,7 @@ export function bulkhead (options: BulkheadOptions = {}): BulkheadPolicy {
 
   const policy = {
     ...base,
+    kind: 'bulkhead' as const,
     stats
   }
   return withObservable(policy, emitter)

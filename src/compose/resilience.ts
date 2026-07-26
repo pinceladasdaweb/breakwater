@@ -1,7 +1,8 @@
-import { compose } from './compose'
 import { basePolicy, type Policy } from '../policy'
+import { compose, type ComposedPolicy } from './compose'
 import { retry, type RetryOptions } from '../retry/retry'
 import { type MetricsCollector } from '../metrics/collector'
+import { attachMetrics, metricsPolicy } from '../metrics/attach'
 import { timeout, type TimeoutOptions } from '../timeout/timeout'
 import { bulkhead, type BulkheadOptions } from '../bulkhead/bulkhead'
 import { rateLimit, type RateLimitOptions } from '../rate-limit/rate-limit'
@@ -10,8 +11,8 @@ import { fallback as fallbackPolicy, type FallbackHandler, type FallbackOptions 
 
 export interface ResilienceOptions {
   /**
-   * Identifies the whole pipeline in metrics (onExecution, onRetry,
-   * onTimeout, onFallback). Falls back to the circuit breaker's name.
+   * Identifies the whole pipeline in every metric event. Falls back to the
+   * circuit breaker's name.
    */
   name?: string
   retry?: RetryOptions
@@ -47,8 +48,9 @@ export interface ResilienceOptions {
  * retry sees CircuitOpenError and gives up fast (default retryIf).
  * For a different order, compose() the policies yourself.
  */
-export function resilience (options: ResilienceOptions = {}): Policy {
+export function resilience (options: ResilienceOptions = {}): ComposedPolicy {
   const name = options.name ?? options.circuitBreaker?.name
+  const metrics = options.metrics
 
   const fb = options.fallback !== undefined
     ? fallbackPolicy(options.fallback, options.fallbackOptions)
@@ -63,48 +65,27 @@ export function resilience (options: ResilienceOptions = {}): Policy {
       : timeout(options.timeout.ms, options.timeout)
     : undefined
 
-  // Assembly order is the documented default:
-  // fallback(retry(rateLimit(bulkhead(breaker(timeout(fn)))))).
-  const slots: Array<Policy | undefined> = [fb, rt, rl, bh, cb, to]
+  if (metrics !== undefined) {
+    // Same generic wiring compose() users get from attachMetrics — the only
+    // extra here is honoring each guard's own metrics name.
+    if (fb !== undefined) attachMetrics(fb, metrics, { name })
+    if (rt !== undefined) attachMetrics(rt, metrics, { name })
+    if (rl !== undefined) attachMetrics(rl, metrics, { name: options.rateLimit?.name ?? name })
+    if (bh !== undefined) attachMetrics(bh, metrics, { name: options.bulkhead?.name ?? name })
+    if (cb !== undefined) attachMetrics(cb, metrics, { name })
+    if (to !== undefined) attachMetrics(to, metrics, { name })
+  }
+
+  // Assembly order is the documented default, with the pipeline-level
+  // execution meter outermost when metrics are wired:
+  // metrics(fallback(retry(rateLimit(bulkhead(breaker(timeout(fn))))))).
+  const mp = metrics !== undefined ? metricsPolicy(metrics, { name, label: 'resilience' }) : undefined
+  const slots: Array<Policy | undefined> = [mp, fb, rt, rl, bh, cb, to]
   const policies = slots.filter((p): p is Policy => p !== undefined)
 
-  const composed = policies.length > 0
-    ? compose(...policies)
-    : basePolicy(async (fn, ctx) => await fn(ctx))
+  if (policies.length === 0) {
+    policies.push(basePolicy(async (fn, ctx) => await fn(ctx)))
+  }
 
-  const metrics = options.metrics
-  if (metrics === undefined) return composed
-
-  // Wiring follows the slot order: fallback, retry, rateLimit, bulkhead, breaker, timeout.
-  fb?.on('fallback', ({ handlerIndex }) => metrics.onFallback?.({ name, handlerIndex }))
-  rt?.on('retry', ({ attempt, delay }) => metrics.onRetry?.({ name, attempt, delayMs: delay }))
-  rl?.on('reject', () => metrics.onReject?.({ policy: 'rateLimit', name: options.rateLimit?.name ?? name, reason: 'rate_limited' }))
-  bh?.on('reject', () => metrics.onReject?.({ policy: 'bulkhead', name: options.bulkhead?.name ?? name, reason: 'bulkhead_full' }))
-  cb?.on('stateChange', ({ from, to: toState }) => metrics.onStateChange?.({ name, from, to: toState }))
-  cb?.on('reject', ({ reason }) => metrics.onReject?.({ policy: 'circuitBreaker', name, reason }))
-  to?.on('timeout', ({ ms }) => metrics.onTimeout?.({ name, ms }))
-
-  return basePolicy(async (fn, ctx) => {
-    const started = Date.now()
-    try {
-      const result = await composed.invoke(fn, ctx)
-      metrics.onExecution?.({
-        policy: 'resilience',
-        name,
-        outcome: 'success',
-        durationMs: Date.now() - started,
-        correlationId: ctx.correlationId
-      })
-      return result
-    } catch (error) {
-      metrics.onExecution?.({
-        policy: 'resilience',
-        name,
-        outcome: 'failure',
-        durationMs: Date.now() - started,
-        correlationId: ctx.correlationId
-      })
-      throw error
-    }
-  })
+  return compose(...policies)
 }

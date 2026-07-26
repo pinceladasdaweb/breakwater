@@ -20,7 +20,7 @@ export {
 export { createContext, basePolicy } from './policy'
 export type { Policy, ExecutionContext, ExecuteOptions, Execution, Invoker } from './policy'
 
-export { createEmitter } from './events'
+export { createEmitter, withObservable } from './events'
 export type { TypedEmitter, Observable, EventMap, Listener } from './events'
 
 export { timeout } from './timeout/timeout'
@@ -56,6 +56,7 @@ export { fallback } from './fallback/fallback'
 export type { FallbackHandler, FallbackOptions, FallbackEvents, FallbackPolicy } from './fallback/fallback'
 
 export { compose } from './compose/compose'
+export type { ComposedPolicy, ComposedStatsEntry } from './compose/compose'
 
 export { resilience } from './compose/resilience'
 export type { ResilienceOptions } from './compose/resilience'
@@ -64,3 +65,6 @@ export { createPolicyRegistry, policies } from './registry/registry'
 export type { PolicyRegistry } from './registry/registry'
 
 export type { MetricsCollector } from './metrics/collector'
+
+export { attachMetrics, metricsPolicy } from './metrics/attach'
+export type { AttachMetricsOptions, MetricsPolicy, MetricsPolicyOptions } from './metrics/attach'
