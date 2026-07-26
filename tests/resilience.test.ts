@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { resilience } from '../src/compose/resilience'
 import { fixed } from '../src/retry/backoff'
 import { type MetricsCollector } from '../src/metrics/collector'
-import { isBulkheadRejectedError, isRetryExhaustedError, isTimeoutError } from '../src/errors'
+import { isBulkheadRejectedError, isRateLimitedError, isRetryExhaustedError, isTimeoutError } from '../src/errors'
 import { drain } from './helpers'
 
 describe('resilience()', () => {
@@ -106,6 +106,20 @@ describe('resilience()', () => {
 
     release()
     assert.equal(await slow, 'slow')
+  })
+
+  test('rateLimit slots in and reports rejections to metrics', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'] })
+    t.mock.timers.setTime(1_000_000)
+    const rejections: string[] = []
+    const policy = resilience({
+      rateLimit: { limit: 1, interval: 1_000, name: 'quota' },
+      metrics: { onReject: (e) => rejections.push(`${e.policy}:${e.reason}:${e.name ?? ''}`) }
+    })
+
+    assert.equal(await policy.execute(() => 'first'), 'first')
+    await assert.rejects(policy.execute(() => 'second'), isRateLimitedError)
+    assert.deepEqual(rejections, ['rateLimit:rate_limited:quota'])
   })
 
   test('fallbackOptions.fallbackIf is honored', async () => {

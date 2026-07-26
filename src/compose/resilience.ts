@@ -4,11 +4,18 @@ import { retry, type RetryOptions } from '../retry/retry'
 import { type MetricsCollector } from '../metrics/collector'
 import { timeout, type TimeoutOptions } from '../timeout/timeout'
 import { bulkhead, type BulkheadOptions } from '../bulkhead/bulkhead'
+import { rateLimit, type RateLimitOptions } from '../rate-limit/rate-limit'
 import { circuitBreaker, type CircuitBreakerOptions } from '../circuit-breaker/circuit-breaker'
 import { fallback as fallbackPolicy, type FallbackHandler, type FallbackOptions } from '../fallback/fallback'
 
 export interface ResilienceOptions {
   retry?: RetryOptions
+  /**
+   * Sits outside the bulkhead: the quota check is the cheapest rejection,
+   * so it runs before a slot is even considered. Retryable — the quota
+   * replenishes on its own, and the outer retry backs off through it.
+   */
+  rateLimit?: RateLimitOptions
   /**
    * Sits outside the circuit breaker: local saturation never pollutes the
    * dependency's failure stats, and the (retryable) rejection lets the
@@ -28,7 +35,7 @@ export interface ResilienceOptions {
 
 /**
  * The batteries-included composition for those who do not want to pick an
- * order: fallback(retry(bulkhead(circuitBreaker(timeout(fn))))).
+ * order: fallback(retry(rateLimit(bulkhead(circuitBreaker(timeout(fn)))))).
  *
  * Retry sits outside the breaker on purpose: every attempt goes through the
  * breaker (feeding its stats individually), and once the circuit opens the
@@ -42,6 +49,7 @@ export function resilience (options: ResilienceOptions = {}): Policy {
     ? fallbackPolicy(options.fallback, options.fallbackOptions)
     : undefined
   const rt = options.retry !== undefined ? retry(options.retry) : undefined
+  const rl = options.rateLimit !== undefined ? rateLimit(options.rateLimit) : undefined
   const bh = options.bulkhead !== undefined ? bulkhead(options.bulkhead) : undefined
   const cb = options.circuitBreaker !== undefined ? circuitBreaker(options.circuitBreaker) : undefined
   const to = options.timeout !== undefined
@@ -51,8 +59,8 @@ export function resilience (options: ResilienceOptions = {}): Policy {
     : undefined
 
   // Assembly order is the documented default:
-  // fallback(retry(bulkhead(breaker(timeout(fn))))).
-  const slots: Array<Policy | undefined> = [fb, rt, bh, cb, to]
+  // fallback(retry(rateLimit(bulkhead(breaker(timeout(fn)))))).
+  const slots: Array<Policy | undefined> = [fb, rt, rl, bh, cb, to]
   const policies = slots.filter((p): p is Policy => p !== undefined)
 
   const composed = policies.length > 0
@@ -62,9 +70,10 @@ export function resilience (options: ResilienceOptions = {}): Policy {
   const metrics = options.metrics
   if (metrics === undefined) return composed
 
-  // Wiring follows the slot order: fallback, retry, bulkhead, breaker, timeout.
+  // Wiring follows the slot order: fallback, retry, rateLimit, bulkhead, breaker, timeout.
   fb?.on('fallback', ({ handlerIndex }) => metrics.onFallback?.({ name, handlerIndex }))
   rt?.on('retry', ({ attempt, delay }) => metrics.onRetry?.({ name, attempt, delayMs: delay }))
+  rl?.on('reject', () => metrics.onReject?.({ policy: 'rateLimit', name: options.rateLimit?.name ?? name, reason: 'rate_limited' }))
   bh?.on('reject', () => metrics.onReject?.({ policy: 'bulkhead', name: options.bulkhead?.name ?? name, reason: 'bulkhead_full' }))
   cb?.on('stateChange', ({ from, to: toState }) => metrics.onStateChange?.({ name, from, to: toState }))
   cb?.on('reject', ({ reason }) => metrics.onReject?.({ policy: 'circuitBreaker', name, reason }))

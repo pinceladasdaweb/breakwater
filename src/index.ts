@@ -4,6 +4,7 @@ export {
   CircuitOpenError,
   IsolatedError,
   BulkheadRejectedError,
+  RateLimitedError,
   RetryExhaustedError,
   FallbackFailedError,
   isBreakwaterError,
@@ -11,6 +12,7 @@ export {
   isCircuitOpenError,
   isIsolatedError,
   isBulkheadRejectedError,
+  isRateLimitedError,
   isRetryExhaustedError,
   isFallbackFailedError
 } from './errors'
@@ -46,6 +48,9 @@ export type { StateStore, BreakerState, WindowCounters, MemoryStoreOptions } fro
 
 export { bulkhead } from './bulkhead/bulkhead'
 export type { BulkheadOptions, BulkheadEvents, BulkheadPolicy, BulkheadStats } from './bulkhead/bulkhead'
+
+export { rateLimit } from './rate-limit/rate-limit'
+export type { RateLimitOptions, RateLimitEvents, RateLimitPolicy, RateLimitStats } from './rate-limit/rate-limit'
 
 export { fallback } from './fallback/fallback'
 export type { FallbackHandler, FallbackOptions, FallbackEvents, FallbackPolicy } from './fallback/fallback'
