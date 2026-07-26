@@ -203,6 +203,35 @@ function logging (log: Logger): Policy {
 const policy = compose(logging(log), retry({ attempts: 3 }), timeout(2_000))
 ```
 
+A custom policy can be a full citizen — typed events, metrics, the works —
+with the same building blocks the built-in policies use:
+
+```ts
+import { basePolicy, createEmitter, withObservable, type Policy, type Observable } from 'breakwater'
+
+interface HedgeEvents extends Record<string, unknown> {
+  hedged: { correlationId: string }
+}
+interface HedgePolicy extends Policy, Observable<HedgeEvents> {
+  readonly kind: 'hedge'
+}
+
+function hedge (afterMs: number): HedgePolicy {
+  const emitter = createEmitter<HedgeEvents>()
+  const base = basePolicy(async (fn, ctx) => {
+    // ...issue a second attempt if the first is still pending after afterMs,
+    // emitting emitter.emit('hedged', { correlationId: ctx.correlationId })
+    return await fn(ctx)
+  })
+  return withObservable({ ...base, kind: 'hedge' as const }, emitter)
+}
+```
+
+`createEmitter` gives you the typed, listener-isolated emitter;
+`withObservable` attaches the chainable `on`/`off`; and `createContext` builds
+a fresh `ExecutionContext` if you ever need to call `invoke` outside a
+pipeline (tests, adapters).
+
 Any composed pipeline — custom policies included — can also be registered
 under a name and shared across modules: see
 [named policies](named-policies.md).

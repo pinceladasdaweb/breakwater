@@ -20,7 +20,7 @@ export {
 export { createContext, basePolicy } from './policy'
 export type { Policy, ExecutionContext, ExecuteOptions, Execution, Invoker } from './policy'
 
-export { createEmitter } from './events'
+export { createEmitter, withObservable } from './events'
 export type { TypedEmitter, Observable, EventMap, Listener } from './events'
 
 export { timeout } from './timeout/timeout'
