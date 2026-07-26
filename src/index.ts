@@ -60,4 +60,7 @@ export { compose } from './compose/compose'
 export { resilience } from './compose/resilience'
 export type { ResilienceOptions } from './compose/resilience'
 
+export { createPolicyRegistry, policies } from './registry/registry'
+export type { PolicyRegistry } from './registry/registry'
+
 export type { MetricsCollector } from './metrics/collector'

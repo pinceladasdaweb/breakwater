@@ -9,6 +9,11 @@ import { circuitBreaker, type CircuitBreakerOptions } from '../circuit-breaker/c
 import { fallback as fallbackPolicy, type FallbackHandler, type FallbackOptions } from '../fallback/fallback'
 
 export interface ResilienceOptions {
+  /**
+   * Identifies the whole pipeline in metrics (onExecution, onRetry,
+   * onTimeout, onFallback). Falls back to the circuit breaker's name.
+   */
+  name?: string
   retry?: RetryOptions
   /**
    * Sits outside the bulkhead: the quota check is the cheapest rejection,
@@ -43,7 +48,7 @@ export interface ResilienceOptions {
  * For a different order, compose() the policies yourself.
  */
 export function resilience (options: ResilienceOptions = {}): Policy {
-  const name = options.circuitBreaker?.name
+  const name = options.name ?? options.circuitBreaker?.name
 
   const fb = options.fallback !== undefined
     ? fallbackPolicy(options.fallback, options.fallbackOptions)

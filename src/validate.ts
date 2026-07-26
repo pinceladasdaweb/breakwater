@@ -1,3 +1,9 @@
+export function assertNonEmptyString (name: string, value: string): void {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new RangeError(`${name} must be a non-empty string, got ${JSON.stringify(value)}`)
+  }
+}
+
 export function assertPositiveFinite (name: string, value: number): void {
   if (!Number.isFinite(value) || value <= 0) {
     throw new RangeError(`${name} must be a positive finite number, got ${value}`)

@@ -198,3 +198,7 @@ function logging (log: Logger): Policy {
 
 const policy = compose(logging(log), retry({ attempts: 3 }), timeout(2_000))
 ```
+
+Any composed pipeline — custom policies included — can also be registered
+under a name and shared across modules: see
+[named policies](named-policies.md).

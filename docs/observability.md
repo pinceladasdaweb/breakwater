@@ -104,7 +104,9 @@ const collector: MetricsCollector = {
 ```
 
 Plug it into `resilience()` and every policy is wired at once — including
-`onExecution` with the total duration and outcome of the whole pipeline:
+`onExecution` with the total duration and outcome of the whole pipeline.
+Tip: with [named policies](named-policies.md) the registry name flows into
+every metric automatically, so you never hand-wire `name` per policy:
 
 ```ts
 const policy = resilience({
