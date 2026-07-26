@@ -69,6 +69,7 @@ export interface CircuitBreakerEvents extends Record<string, unknown> {
 }
 
 export interface CircuitBreakerPolicy extends Policy, Observable<CircuitBreakerEvents> {
+  readonly kind: 'circuitBreaker'
   /** Last locally-known state (exact with the in-memory store). */
   readonly state: BreakerState
   stats: () => CircuitBreakerStats
@@ -267,6 +268,7 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
 
   const policy = {
     ...base,
+    kind: 'circuitBreaker' as const,
     get state () {
       return localState
     },

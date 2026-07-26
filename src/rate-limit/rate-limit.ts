@@ -34,6 +34,7 @@ export interface RateLimitEvents extends Record<string, unknown> {
 }
 
 export interface RateLimitPolicy extends Policy, Observable<RateLimitEvents> {
+  readonly kind: 'rateLimit'
   stats: () => RateLimitStats
 }
 
@@ -178,6 +179,7 @@ export function rateLimit (options: RateLimitOptions): RateLimitPolicy {
 
   const policy = {
     ...base,
+    kind: 'rateLimit' as const,
     stats
   }
 

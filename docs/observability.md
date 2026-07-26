@@ -121,18 +121,63 @@ Ready-made `breakwater/prometheus` and `/otel` entry points
 implementing this interface are planned — the core will never import
 `prom-client` or OpenTelemetry itself.
 
-## Recipe: everything into one logger
+## Manual pipelines: `attachMetrics()` and `metricsPolicy()`
+
+Building with `compose()` instead of `resilience()`? The same wiring is one
+call — `attachMetrics` walks the composition, discovers each policy by its
+`kind` and subscribes the right events:
 
 ```ts
-function observe (name: string, policy: RetryPolicy | CircuitBreakerPolicy | TimeoutPolicy | FallbackPolicy, log: Logger): void {
-  const anyPolicy = policy as { on: (event: string, fn: (payload: unknown) => void) => unknown }
-  for (const event of ['retry', 'giveUp', 'timeout', 'stateChange', 'reject', 'fallback']) {
-    try {
-      anyPolicy.on(event, (payload) => log.info({ policy: name, event, ...payload as object }))
-    } catch { /* policy does not emit this event */ }
-  }
-}
+import { attachMetrics, metricsPolicy, compose, fallback, retry, circuitBreaker, timeout } from 'breakwater'
+
+const pipeline = compose(
+  metricsPolicy(collector, { name: 'payments-api' }), // outermost: onExecution with total duration
+  fallback(stale),
+  retry({ attempts: 3 }),
+  circuitBreaker({ name: 'payments-api' }),
+  timeout(2_000)
+)
+
+const detach = attachMetrics(pipeline, collector, { name: 'payments-api' })
+// ...later, if the pipeline is short-lived:
+detach()
 ```
 
-(A first-class `attachMetrics()` helper for manual `compose()` users is
-planned.)
+- `attachMetrics` accepts a single policy, an array, or a whole composition,
+  and returns a detach function that unsubscribes everything.
+- `onExecution` is not an event — it measures the pipeline as a whole, so it
+  lives in `metricsPolicy()`, a regular policy you place outermost.
+- Custom policies participate too: declare a `kind` and emit the matching
+  events, or skip both and be walked over harmlessly.
+
+## Aggregated `stats()` on compositions
+
+Every `compose()` (and `resilience()`) result exposes the snapshots of its
+inner policies — one entry per policy that has a `stats()`, nested
+compositions flattened:
+
+```ts
+const pipeline = resilience({
+  rateLimit: { limit: 100, interval: 60_000 },
+  circuitBreaker: { name: 'payments-api' },
+  timeout: 2_000
+})
+
+pipeline.stats()
+// [
+//   { kind: 'rateLimit',      stats: { remaining: 37, limit: 100, ... } },
+//   { kind: 'circuitBreaker', stats: { state: 'closed', failureRate: 0, ... } }
+// ]
+```
+
+Combined with [named policies](named-policies.md), a health endpoint over
+every pipeline in the app is a few lines:
+
+```ts
+app.get('/health/policies', (_req, res) => {
+  res.json(Object.fromEntries(policies.names().map((name) => {
+    const policy = policies.get(name) as { stats?: () => unknown }
+    return [name, policy.stats?.() ?? 'no stats']
+  })))
+})
+```

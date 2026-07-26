@@ -20,7 +20,9 @@ export interface FallbackEvents extends Record<string, unknown> {
   fallback: { error: unknown, handlerIndex: number, correlationId: string }
 }
 
-export interface FallbackPolicy extends Policy, Observable<FallbackEvents> {}
+export interface FallbackPolicy extends Policy, Observable<FallbackEvents> {
+  readonly kind: 'fallback'
+}
 
 /**
  * Replaces a failed execution with a value. Accepts a single handler or a
@@ -65,5 +67,5 @@ export function fallback<T> (
     }
   })
 
-  return withObservable(base, emitter)
+  return withObservable({ ...base, kind: 'fallback' as const }, emitter)
 }

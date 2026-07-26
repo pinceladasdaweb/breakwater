@@ -28,7 +28,9 @@ flowchart LR
 ```
 
 The result of `compose()` is itself a policy — it has `execute`, `wrap` and
-`invoke`, so compositions compose again:
+`invoke`, so compositions compose again. It also exposes the composed
+`policies` and an aggregated `stats()` (see
+[observability](observability.md#aggregated-stats-on-compositions)):
 
 ```ts
 const inner = compose(circuitBreaker({ name: 'api' }), timeout(2_000))

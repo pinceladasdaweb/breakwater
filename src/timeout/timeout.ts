@@ -20,7 +20,9 @@ export interface TimeoutEvents extends Record<string, unknown> {
   timeout: { ms: number, mode: 'cooperative' | 'aggressive', correlationId: string }
 }
 
-export interface TimeoutPolicy extends Policy, Observable<TimeoutEvents> {}
+export interface TimeoutPolicy extends Policy, Observable<TimeoutEvents> {
+  readonly kind: 'timeout'
+}
 
 /** Rejects with the signal's reason as soon as (or if already) aborted. */
 async function rejectOnAbort (signal: AbortSignal): Promise<never> {
@@ -103,5 +105,5 @@ export function timeout (ms: number, options: TimeoutOptions = {}): TimeoutPolic
     }
   })
 
-  return withObservable(base, emitter)
+  return withObservable({ ...base, kind: 'timeout' as const }, emitter)
 }

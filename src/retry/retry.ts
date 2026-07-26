@@ -32,7 +32,9 @@ export interface RetryEvents extends Record<string, unknown> {
   giveUp: { attempts: number, error: unknown, correlationId: string }
 }
 
-export interface RetryPolicy extends Policy, Observable<RetryEvents> {}
+export interface RetryPolicy extends Policy, Observable<RetryEvents> {
+  readonly kind: 'retry'
+}
 
 const defaultRetryIf = (error: unknown): boolean =>
   !(isBreakwaterError(error) && !error.retryable)
@@ -106,5 +108,5 @@ export function retry (options: RetryOptions = {}): RetryPolicy {
     throw new RetryExhaustedError(attempts, lastError)
   })
 
-  return withObservable(base, emitter)
+  return withObservable({ ...base, kind: 'retry' as const }, emitter)
 }

@@ -56,6 +56,13 @@ export interface Policy {
    * can participate in composition.
    */
   invoke: <T>(fn: Execution<T>, ctx: ExecutionContext) => Promise<T>
+
+  /**
+   * Discriminates the policy type ('retry', 'circuitBreaker', ...) for
+   * generic tooling like attachMetrics() and aggregated stats(). Custom
+   * policies may omit it.
+   */
+  readonly kind?: string
 }
 
 /** The invoke signature, for policy implementations. */
