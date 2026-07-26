@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 0.5.0 (2026-07-26)
+
+* feat(minor): add attachMetrics, metricsPolicy and aggregated stats by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/24b86a477c1d26c11447ae9e6feb4b58ed40d76b)
+* fix: harden metrics tooling after adversarial review by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/d725a46cf48cc5f190b3c515255ee8b01f1b495f)
+* docs: cover the custom-policy building blocks by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/861fde393ad69a1edb32056eeaa735767fc86df5)
+
+
 ## 0.4.0 (2026-07-26)
 
 * feat(minor): add named policy registry by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/d6a8e799cd92a2a55ced815bc2b094f5d5c2451d)
