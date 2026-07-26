@@ -17,5 +17,5 @@ export interface MetricsCollector {
   onTimeout?: (event: { name?: string, ms: number }) => void
   onStateChange?: (event: { name?: string, from: string, to: string }) => void
   onFallback?: (event: { name?: string, handlerIndex: number }) => void
-  onReject?: (event: { policy: string, name?: string, reason: 'circuit_open' | 'isolated' | 'bulkhead_full' }) => void
+  onReject?: (event: { policy: string, name?: string, reason: 'circuit_open' | 'isolated' | 'bulkhead_full' | 'rate_limited' }) => void
 }

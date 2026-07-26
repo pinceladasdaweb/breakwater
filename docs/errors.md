@@ -25,6 +25,7 @@ import {
 | `CircuitOpenError` | `CIRCUIT_OPEN` | **`false`** | `stats` — breaker snapshot at rejection time |
 | `IsolatedError` | `CIRCUIT_ISOLATED` | **`false`** | — |
 | `BulkheadRejectedError` | `BULKHEAD_REJECTED` | `true` | `stats` — bulkhead snapshot; saturation is transient, so retrying with backoff makes sense |
+| `RateLimitedError` | `RATE_LIMITED` | `true` | `stats` and `retryAfterMs` — exactly how long until admission; the quota replenishes on its own |
 | `FallbackFailedError` | `FALLBACK_FAILED` | `true` | `originalError` (the operation's error); last handler's error in `cause` |
 
 ### The `retryable` flag

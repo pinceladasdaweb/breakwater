@@ -1,4 +1,5 @@
 import type { BulkheadStats } from './bulkhead/bulkhead'
+import type { RateLimitStats } from './rate-limit/rate-limit'
 import type { CircuitBreakerStats } from './circuit-breaker/circuit-breaker'
 
 /**
@@ -77,6 +78,23 @@ export class BulkheadRejectedError extends BreakwaterError {
 }
 
 /**
+ * Thrown by the rate limit policy, without executing the function, when the
+ * quota is exhausted. Carries how long until the next admission — and stays
+ * retryable, since the quota replenishes on its own.
+ */
+export class RateLimitedError extends BreakwaterError {
+  readonly stats: RateLimitStats
+  /** Milliseconds until an execution would be admitted again. */
+  readonly retryAfterMs: number
+
+  constructor (stats: RateLimitStats, retryAfterMs: number) {
+    super('Rate limit exceeded — request rejected without execution', 'RATE_LIMITED')
+    this.stats = stats
+    this.retryAfterMs = retryAfterMs
+  }
+}
+
+/**
  * Thrown by the retry policy when every attempt failed (or the deadline
  * would be exceeded). The last underlying error is available as `cause`.
  */
@@ -123,6 +141,10 @@ export function isIsolatedError (error: unknown): error is IsolatedError {
 
 export function isBulkheadRejectedError (error: unknown): error is BulkheadRejectedError {
   return error instanceof BulkheadRejectedError
+}
+
+export function isRateLimitedError (error: unknown): error is RateLimitedError {
+  return error instanceof RateLimitedError
 }
 
 export function isRetryExhaustedError (error: unknown): error is RetryExhaustedError {

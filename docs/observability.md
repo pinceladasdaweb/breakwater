@@ -39,6 +39,7 @@ The full event catalog:
 | circuit breaker | `reject` | `{ reason, correlationId }` |
 | circuit breaker | `success` / `failure` | `{ durationMs, correlationId }` (+ `error` on failure) |
 | bulkhead | `reject` | `{ stats, correlationId }` |
+| rate limit | `reject` | `{ stats, retryAfterMs, correlationId }` |
 | fallback | `fallback` | `{ error, handlerIndex, correlationId }` |
 
 Guarantees:
