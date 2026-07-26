@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## 0.5.1 (2026-07-26)
+
+* test: assert the collector-error report instead of printing it by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/0cf82797272ac3d8026539b228541b1e0bf8370f)
+
+
 ## 0.5.0 (2026-07-26)
 
 * feat(minor): add attachMetrics, metricsPolicy and aggregated stats by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/24b86a477c1d26c11447ae9e6feb4b58ed40d76b)
