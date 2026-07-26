@@ -175,8 +175,10 @@ burst. The rate limit comes first because its check is the cheapest.
 
 Every option is optional; omitted policies simply drop out of the chain.
 `timeout` accepts `{ ms, mode }` for the aggressive mode, and
-`fallbackOptions` carries `fallbackIf`. Need a different order? Use
-`compose()` — that is why it exists.
+`fallbackOptions` carries `fallbackIf`. (When `metrics` is set, a
+[`metricsPolicy`](observability.md#manual-pipelines-attachmetrics-and-metricspolicy)
+is composed outermost to measure the whole pipeline.) Need a different
+order? Use `compose()` — that is why it exists.
 
 ## Custom policies compose too
 

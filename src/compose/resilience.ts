@@ -11,8 +11,8 @@ import { fallback as fallbackPolicy, type FallbackHandler, type FallbackOptions 
 
 export interface ResilienceOptions {
   /**
-   * Identifies the whole pipeline in metrics (onExecution, onRetry,
-   * onTimeout, onFallback). Falls back to the circuit breaker's name.
+   * Identifies the whole pipeline in every metric event. Falls back to the
+   * circuit breaker's name.
    */
   name?: string
   retry?: RetryOptions

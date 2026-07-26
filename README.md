@@ -248,6 +248,11 @@ const policy = resilience({
 })
 ```
 
+Building with `compose()` instead? `attachMetrics(pipeline, collector)` wires
+a whole composition in one call, and `metricsPolicy(collector)` measures the
+pipeline as a regular outermost policy. Compositions also expose an
+aggregated `stats()` of their inner policies.
+
 Prometheus and OpenTelemetry adapters implementing this interface are planned as
 optional entry points. See [docs/observability.md](docs/observability.md).
 

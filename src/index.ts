@@ -67,4 +67,4 @@ export type { PolicyRegistry } from './registry/registry'
 export type { MetricsCollector } from './metrics/collector'
 
 export { attachMetrics, metricsPolicy } from './metrics/attach'
-export type { AttachMetricsOptions, MetricsPolicyOptions } from './metrics/attach'
+export type { AttachMetricsOptions, MetricsPolicy, MetricsPolicyOptions } from './metrics/attach'

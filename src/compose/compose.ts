@@ -42,9 +42,14 @@ export function compose (...policies: Policy[]): ComposedPolicy {
     policies.flatMap((policy) => {
       const source = policy as Policy & { stats?: () => unknown }
       if (typeof source.stats !== 'function') return []
-      if (policy.kind === 'compose') return source.stats() as ComposedStatsEntry[]
+      if (policy.kind === 'compose') {
+        const nested = source.stats()
+        return Array.isArray(nested) ? nested as ComposedStatsEntry[] : []
+      }
       return [{ kind: policy.kind ?? 'custom', stats: source.stats() }]
     })
 
-  return { ...base, kind: 'compose' as const, policies, stats }
+  // A frozen copy: the exposed list can never rewrite the invoke chain,
+  // which closes over the private rest-parameter array.
+  return { ...base, kind: 'compose' as const, policies: Object.freeze([...policies]), stats }
 }

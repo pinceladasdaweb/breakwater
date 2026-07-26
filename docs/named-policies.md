@@ -70,6 +70,10 @@ policies.define('partner-quota', {
 
 An explicit inner `name` always wins over the registry name.
 
+Entries built from `resilience()` options also expose the
+[aggregated `stats()`](observability.md#aggregated-stats-on-compositions) —
+a health endpoint over every named policy is a few lines.
+
 ## Custom pipelines register too
 
 Anything implementing the `Policy` contract can be defined — including a

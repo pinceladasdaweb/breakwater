@@ -83,7 +83,7 @@ describe('attachMetrics()', () => {
     assert.deepEqual(events, ['reject:rateLimit:rate_limited', 'reject:bulkhead:bulkhead_full'])
   })
 
-  test('detach unsubscribes everything', async () => {
+  test('detach unsubscribes everything and is idempotent', async () => {
     const events: string[] = []
     const policy = retry({ attempts: 2, backoff: fixed(0) })
     const detach = attachMetrics(policy, recordingCollector(events))
@@ -92,8 +92,28 @@ describe('attachMetrics()', () => {
     assert.equal(events.length, 1)
 
     detach()
+    detach() // calling twice must be safe
     await assert.rejects(policy.execute(() => { throw new Error('down') }))
     assert.equal(events.length, 1) // no new events after detach
+  })
+
+  test('wires timeout policies', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const events: string[] = []
+    const policy = timeout(50)
+    attachMetrics(policy, recordingCollector(events))
+
+    const promise = policy.execute(async ({ signal }) => {
+      return await new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+      })
+    })
+    const assertion = assert.rejects(promise)
+    await drain()
+    t.mock.timers.tick(50)
+    await assertion
+
+    assert.deepEqual(events, ['timeout:50'])
   })
 
   test('custom policies without kind or events are skipped harmlessly', () => {
@@ -104,6 +124,14 @@ describe('attachMetrics()', () => {
 })
 
 describe('metricsPolicy()', () => {
+  test('a throwing collector never changes the execution outcome', async () => {
+    const throwing = { onExecution: () => { throw new Error('collector boom') } }
+    const policy = metricsPolicy(throwing)
+
+    assert.equal(await policy.execute(() => 'the result survives'), 'the result survives')
+    await assert.rejects(policy.execute(() => { throw new Error('original error') }), /original error/)
+  })
+
   test('reports success and failure with total pipeline duration', async () => {
     const events: string[] = []
     const pipeline = compose(
@@ -154,11 +182,22 @@ describe('aggregated stats()', () => {
     assert.deepEqual(kinds, ['rateLimit', 'circuitBreaker'])
   })
 
-  test('composed pipelines expose their inner policies for introspection', () => {
+  test('composed pipelines expose their inner policies for introspection, frozen', () => {
     const to = timeout(1_000)
     const rt = retry()
     const pipeline = compose(rt, to)
 
-    assert.deepEqual(pipeline.policies, [rt, to])
+    assert.deepEqual([...pipeline.policies], [rt, to])
+    assert.ok(Object.isFrozen(pipeline.policies))
+  })
+
+  test('a stats-bearing custom policy without kind aggregates as custom', async () => {
+    const custom = {
+      ...basePolicy(async (fn, ctx) => await fn(ctx)),
+      stats: () => ({ anything: 42 })
+    }
+    const pipeline = compose(custom)
+
+    assert.deepEqual(pipeline.stats(), [{ kind: 'custom', stats: { anything: 42 } }])
   })
 })

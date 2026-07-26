@@ -7,7 +7,7 @@ treats observability as core behavior, not a plugin.
 Three complementary surfaces:
 
 1. **Typed events** per policy — push, for logs and alerting
-2. **`stats()`** on the circuit breaker — pull, for dashboards and debugging
+2. **`stats()`** on stateful policies and compositions — pull, for dashboards and debugging
 3. **`MetricsCollector`** — one interface for your metrics pipeline
 
 ## Typed events
@@ -144,11 +144,20 @@ detach()
 ```
 
 - `attachMetrics` accepts a single policy, an array, or a whole composition,
-  and returns a detach function that unsubscribes everything.
+  and returns a detach function that unsubscribes everything (idempotent).
 - `onExecution` is not an event — it measures the pipeline as a whole, so it
-  lives in `metricsPolicy()`, a regular policy you place outermost.
-- Custom policies participate too: declare a `kind` and emit the matching
-  events, or skip both and be walked over harmlessly.
+  lives in `metricsPolicy()`, a regular policy you place outermost. Its
+  `label` option (default `'pipeline'`; `resilience()` uses `'resilience'`)
+  arrives as the `policy` field of `onExecution`, and a collector that
+  throws is reported and ignored — monitoring never changes an outcome.
+- What gets wired, by `kind`: `retry` → `onRetry`; `timeout` → `onTimeout`;
+  `circuitBreaker` → `onStateChange` + `onReject`; `bulkhead` and
+  `rateLimit` → `onReject`; `fallback` → `onFallback`. Compositions are
+  recursed into; unknown kinds are skipped harmlessly — custom policies
+  participate by declaring a matching `kind` and emitting those events.
+- Two footguns: attaching the same collector twice duplicates events, and a
+  `resilience({ metrics })` result is **already wired** — don't attach the
+  same collector to it again.
 
 ## Aggregated `stats()` on compositions
 
@@ -176,7 +185,9 @@ every pipeline in the app is a few lines:
 ```ts
 app.get('/health/policies', (_req, res) => {
   res.json(Object.fromEntries(policies.names().map((name) => {
-    const policy = policies.get(name) as { stats?: () => unknown }
+    // Entries built from resilience() options always expose stats();
+    // the fallback only fires for prebuilt custom policies without one.
+    const policy = policies.get(name) as Policy & { stats?: () => unknown }
     return [name, policy.stats?.() ?? 'no stats']
   })))
 })

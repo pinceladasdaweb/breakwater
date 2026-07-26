@@ -4,38 +4,50 @@ import { type MetricsCollector } from './collector'
 export interface MetricsPolicyOptions {
   /** The `name` reported in onExecution events. */
   name?: string
-  /** The `policy` label reported in onExecution events. Default: 'pipeline'. */
+  /**
+   * Arrives as the `policy` field of onExecution events. Default:
+   * 'pipeline' ('resilience' when wired by resilience()).
+   */
   label?: string
+}
+
+export interface MetricsPolicy extends Policy {
+  readonly kind: 'metrics'
 }
 
 /**
  * A policy that reports every execution flowing through it — outcome and
  * total duration — to the collector's onExecution. Place it outermost in a
  * compose() so it measures the whole pipeline.
+ *
+ * A collector that throws is reported and ignored: monitoring must never
+ * change an execution's outcome.
  */
-export function metricsPolicy (collector: MetricsCollector, options: MetricsPolicyOptions = {}): Policy {
+export function metricsPolicy (collector: MetricsCollector, options: MetricsPolicyOptions = {}): MetricsPolicy {
   const { name, label = 'pipeline' } = options
+
+  const report = (outcome: 'success' | 'failure', started: number, correlationId: string): void => {
+    try {
+      collector.onExecution?.({
+        policy: label,
+        name,
+        outcome,
+        durationMs: Date.now() - started,
+        correlationId
+      })
+    } catch (error) {
+      console.error('breakwater: metrics collector threw', error)
+    }
+  }
 
   const base = basePolicy(async (fn, ctx) => {
     const started = Date.now()
     try {
       const result = await fn(ctx)
-      collector.onExecution?.({
-        policy: label,
-        name,
-        outcome: 'success',
-        durationMs: Date.now() - started,
-        correlationId: ctx.correlationId
-      })
+      report('success', started, ctx.correlationId)
       return result
     } catch (error) {
-      collector.onExecution?.({
-        policy: label,
-        name,
-        outcome: 'failure',
-        durationMs: Date.now() - started,
-        correlationId: ctx.correlationId
-      })
+      report('failure', started, ctx.correlationId)
       throw error
     }
   })
@@ -58,10 +70,13 @@ type LooseObservable = Policy & {
  * whole composition (inner policies are discovered through `kind` and
  * `policies`). This is what resilience() uses internally; call it directly
  * when you build pipelines with compose(). Returns a detach function that
- * unsubscribes everything.
+ * unsubscribes everything (calling it more than once is safe).
  *
- * Note: onExecution is not an event — for pipeline timing, compose a
- * metricsPolicy() as the outermost policy.
+ * Notes:
+ * - onExecution is not an event — for pipeline timing, compose a
+ *   metricsPolicy() as the outermost policy.
+ * - Attaching twice duplicates events, and a resilience({ metrics }) result
+ *   is ALREADY wired — attaching the same collector to it double-reports.
  */
 export function attachMetrics (
   target: Policy | readonly Policy[],
@@ -80,7 +95,8 @@ export function attachMetrics (
 
   const visit = (policy: Policy): void => {
     if (policy.kind === 'compose' && 'policies' in policy) {
-      (policy as { policies: readonly Policy[] }).policies.forEach(visit)
+      const inner = (policy as { policies: unknown }).policies
+      if (Array.isArray(inner)) (inner as Policy[]).forEach(visit)
       return
     }
 
