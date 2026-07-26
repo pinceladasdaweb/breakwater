@@ -150,6 +150,7 @@ import { resilience, exponential } from 'breakwater'
 
 const policy = resilience({
   retry: { attempts: 3, backoff: exponential({ initial: 200 }) },
+  bulkhead: { concurrency: 20, queue: 50 },
   circuitBreaker: { name: 'payments-api', failureThreshold: 0.5 },
   timeout: 2_000,                      // number = shortcut for { ms: 2000 }
   fallback: () => ({ queued: true }),  // single handler or a chain
@@ -160,8 +161,12 @@ const policy = resilience({
 Fixed, documented order — exactly Option A with fallback outside:
 
 ```
-fallback( retry( circuitBreaker( timeout( fn ) ) ) )
+fallback( retry( bulkhead( circuitBreaker( timeout( fn ) ) ) ) )
 ```
+
+The [bulkhead](bulkhead.md) sits outside the breaker on purpose: local
+saturation must not open a circuit that describes the *dependency's* health,
+and its retryable rejection lets the outer retry back off through a burst.
 
 Every option is optional; omitted policies simply drop out of the chain.
 `timeout` accepts `{ ms, mode }` for the aggressive mode, and

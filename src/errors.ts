@@ -1,3 +1,4 @@
+import type { BulkheadStats } from './bulkhead/bulkhead'
 import type { CircuitBreakerStats } from './circuit-breaker/circuit-breaker'
 
 /**
@@ -62,6 +63,20 @@ export class IsolatedError extends BreakwaterError {
 }
 
 /**
+ * Thrown by the bulkhead, without executing the function, when every
+ * execution slot is busy and the wait queue is full. Unlike an open
+ * circuit, saturation is usually transient — the error stays retryable.
+ */
+export class BulkheadRejectedError extends BreakwaterError {
+  readonly stats: BulkheadStats
+
+  constructor (stats: BulkheadStats) {
+    super('Bulkhead is full — request rejected without execution', 'BULKHEAD_REJECTED')
+    this.stats = stats
+  }
+}
+
+/**
  * Thrown by the retry policy when every attempt failed (or the deadline
  * would be exceeded). The last underlying error is available as `cause`.
  */
@@ -104,6 +119,10 @@ export function isCircuitOpenError (error: unknown): error is CircuitOpenError {
 
 export function isIsolatedError (error: unknown): error is IsolatedError {
   return error instanceof IsolatedError
+}
+
+export function isBulkheadRejectedError (error: unknown): error is BulkheadRejectedError {
+  return error instanceof BulkheadRejectedError
 }
 
 export function isRetryExhaustedError (error: unknown): error is RetryExhaustedError {

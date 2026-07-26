@@ -196,6 +196,35 @@ export async function guardedFetch (url: string, init?: RequestInit): Promise<Re
 }
 ```
 
+## Synchronous reset: recreate the policy
+
+`reset()`, `isolate()` and `unisolate()` return promises because a state
+store may be remote. When a call site cannot await — a constructor, an
+event handler, a synchronous API you must preserve — recreate the breaker
+instead of resetting it. Creation is cheap and a fresh instance *is* a
+clean closed circuit:
+
+```ts
+class BrokerClient {
+  #breaker = this.#createBreaker()
+
+  #createBreaker () {
+    const breaker = circuitBreaker({ name: 'broker', consecutiveFailures: 5 })
+    breaker.on('stateChange', (event) => this.onCircuitChange(event))
+    return breaker
+  }
+
+  // Called synchronously from a reconnection handler: failures accumulated
+  // against the previous connection say nothing about the new one.
+  resetCircuit () {
+    this.#breaker = this.#createBreaker()
+  }
+}
+```
+
+Remember to re-attach listeners in the factory — they belong to the
+instance, not the name.
+
 ## Gotchas
 
 - **Give the breaker a `name`.** Anonymous breakers get a generated name —

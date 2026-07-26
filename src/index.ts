@@ -3,12 +3,14 @@ export {
   TimeoutError,
   CircuitOpenError,
   IsolatedError,
+  BulkheadRejectedError,
   RetryExhaustedError,
   FallbackFailedError,
   isBreakwaterError,
   isTimeoutError,
   isCircuitOpenError,
   isIsolatedError,
+  isBulkheadRejectedError,
   isRetryExhaustedError,
   isFallbackFailedError
 } from './errors'
@@ -41,6 +43,9 @@ export type { Window } from './circuit-breaker/window'
 
 export { memoryStore } from './circuit-breaker/state-store'
 export type { StateStore, BreakerState, WindowCounters, MemoryStoreOptions } from './circuit-breaker/state-store'
+
+export { bulkhead } from './bulkhead/bulkhead'
+export type { BulkheadOptions, BulkheadEvents, BulkheadPolicy, BulkheadStats } from './bulkhead/bulkhead'
 
 export { fallback } from './fallback/fallback'
 export type { FallbackHandler, FallbackOptions, FallbackEvents, FallbackPolicy } from './fallback/fallback'
