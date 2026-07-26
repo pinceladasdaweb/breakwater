@@ -139,6 +139,32 @@ const policy = retry({ attempts: 10, backoff: exponential(), signal: shutdown.si
 // SIGTERM cancels pending delays immediately; in-flight work is not retried
 ```
 
+## Migrating from a hand-rolled retry
+
+Two differences tend to surprise code that previously rolled its own loop:
+
+**1. Exhaustion throws an envelope, not the last error.** A typical
+hand-rolled loop rethrows the last failure; breakwater throws
+[`RetryExhaustedError`](errors.md) with the last error in `cause`. If your
+callers branch on the original error type, unwrap at the boundary:
+
+```ts
+import { isRetryExhaustedError } from 'breakwater'
+
+try {
+  return await policy.execute(operation)
+} catch (error) {
+  // Callers keep receiving the last real error, as before the migration.
+  throw isRetryExhaustedError(error) ? error.cause : error
+}
+```
+
+**2. Delays are jittered by default.** Hand-rolled loops usually compute
+exact exponential delays; breakwater's default backoff applies full jitter
+(a good thing in production — see above). For delay-for-delay parity during
+a migration, use `exponential({ initial, jitter: 'none' })`, then consider
+turning jitter back on once the behavior is validated.
+
 ## Gotchas
 
 - **Retry without a budget is a latency bug**: 5 attempts with exponential
