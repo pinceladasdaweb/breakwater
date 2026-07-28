@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## 0.5.2 (2026-07-28)
+
+* refactor: drop the last node: imports from the core by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/6847063e11a8bcf2328619788372665034a129c2)
+
+
 ## 0.5.1 (2026-07-26)
 
 * test: assert the collector-error report instead of printing it by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/0cf82797272ac3d8026539b228541b1e0bf8370f)
