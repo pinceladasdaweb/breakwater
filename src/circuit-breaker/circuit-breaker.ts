@@ -1,5 +1,6 @@
 import { type Window } from './window'
-import { randomUUID } from 'node:crypto'
+
+const randomUUID = (): string => globalThis.crypto.randomUUID()
 import { basePolicy, type Policy } from '../policy'
 import { CircuitOpenError, IsolatedError } from '../errors'
 import { assertPositiveFinite, assertPositiveInt } from '../validate'

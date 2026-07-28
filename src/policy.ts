@@ -1,4 +1,7 @@
-import { randomUUID } from 'node:crypto'
+// Web-standard crypto (Node 19+, Deno, Bun, browsers): the core deliberately
+// avoids node: imports so nothing ties it to a single runtime. Called through
+// the crypto object — Web Crypto methods require their receiver.
+const randomUUID = (): string => globalThis.crypto.randomUUID()
 
 /**
  * The context that travels through the whole policy pipeline.
