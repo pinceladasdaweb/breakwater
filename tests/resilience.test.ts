@@ -96,8 +96,7 @@ describe('resilience()', () => {
       metrics: { onReject: (e) => rejections.push(`${e.policy}:${e.reason}`) }
     })
 
-    let release: (() => void) = () => {}
-    const gate = new Promise<void>((resolve) => { release = resolve })
+    const { promise: gate, resolve: release } = Promise.withResolvers<void>()
     const slow = policy.execute(async () => { await gate; return 'slow' })
     for (let i = 0; i < 10; i++) await Promise.resolve()
 
