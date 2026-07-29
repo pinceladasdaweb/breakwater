@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## 0.5.4 (2026-07-29)
+
+* test: use Promise.withResolvers for deferred gates by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/1ef59fe1355e55143ddad780751ea9f2e939c85c)
+
+
 ## 0.5.3 (2026-07-29)
 
 * chore: raise lib to ES2024 by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/54a9fc6320a48034bcd50e8b800ba14d019d7bf1)
