@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 0.5.3 (2026-07-29)
+
+* chore: raise lib to ES2024 by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/54a9fc6320a48034bcd50e8b800ba14d019d7bf1)
+* ci: add Node 26 to the test matrix by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/1db1a385c0474f2a4908870c9157f832d43735c6)
+
+
 ## 0.5.2 (2026-07-28)
 
 * refactor: drop the last node: imports from the core by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/6847063e11a8bcf2328619788372665034a129c2)
