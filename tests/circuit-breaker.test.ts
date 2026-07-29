@@ -139,8 +139,7 @@ describe('half-open', () => {
     await failTimes(breaker, 1)
     t.mock.timers.tick(1_000)
 
-    let release: (() => void) = () => {}
-    const gate = new Promise<void>((resolve) => { release = resolve })
+    const { promise: gate, resolve: release } = Promise.withResolvers<void>()
 
     const probe = breaker.execute(async () => { await gate; return 'slow probe' })
     await drain() // let the probe fully enter the half-open slot
@@ -157,8 +156,7 @@ describe('half-open', () => {
     await failTimes(breaker, 1)
     t.mock.timers.tick(1_000)
 
-    let release: (() => void) = () => {}
-    const gate = new Promise<void>((resolve) => { release = resolve })
+    const { promise: gate, resolve: release } = Promise.withResolvers<void>()
     let concurrent = 0
     let maxConcurrent = 0
     const probe = async (): Promise<string> => {
@@ -198,8 +196,7 @@ describe('half-open', () => {
     t.mock.timers.tick(1_000)
 
     // Period 1: slow probe A starts, probe B fails and reopens the circuit.
-    let releaseA: (() => void) = () => {}
-    const gateA = new Promise<void>((resolve) => { releaseA = resolve })
+    const { promise: gateA, resolve: releaseA } = Promise.withResolvers<void>()
     const probeA = breaker.execute(async () => { await gateA; return 'stale success' })
     await drain()
     await assert.rejects(breaker.execute(boom))
@@ -228,8 +225,7 @@ describe('half-open', () => {
     await failTimes(breaker, 1)
     t.mock.timers.tick(1_000)
 
-    let rejectA: ((e: Error) => void) = () => {}
-    const gateA = new Promise<never>((_resolve, reject) => { rejectA = reject })
+    const { promise: gateA, reject: rejectA } = Promise.withResolvers<never>()
     const probeA = breaker.execute(async () => await gateA).catch((e: unknown) => e)
     await drain()
     await assert.rejects(breaker.execute(boom)) // reopens (period 1 ends)

@@ -8,8 +8,7 @@ import { drain } from './helpers'
 /** A controllable execution: stays in flight until released. */
 function gated (): { fn: () => Promise<string>, release: () => void, running: () => number } {
   let running = 0
-  let release: (() => void) = () => {}
-  const gate = new Promise<void>((resolve) => { release = resolve })
+  const { promise: gate, resolve: release } = Promise.withResolvers<void>()
   return {
     fn: async () => {
       running++
@@ -43,8 +42,7 @@ describe('admission', () => {
     const policy = bulkhead({ concurrency: 2, queue: 10 })
     let concurrent = 0
     let maxConcurrent = 0
-    let release: (() => void) = () => {}
-    const gate = new Promise<void>((resolve) => { release = resolve })
+    const { promise: gate, resolve: release } = Promise.withResolvers<void>()
 
     const calls = Array.from({ length: 8 }, async () =>
       await policy.execute(async () => {
@@ -105,8 +103,7 @@ describe('queue', () => {
   test('admits waiters in FIFO order', async () => {
     const policy = bulkhead({ concurrency: 1, queue: 3 })
     const order: string[] = []
-    let release: (() => void) = () => {}
-    const gate = new Promise<void>((resolve) => { release = resolve })
+    const { promise: gate, resolve: release } = Promise.withResolvers<void>()
 
     const blocker = policy.execute(async () => { await gate })
     await drain()
@@ -125,8 +122,7 @@ describe('queue', () => {
 
   test('a failing execution still hands its slot to the next waiter', async () => {
     const policy = bulkhead({ concurrency: 1, queue: 2 })
-    let fail: ((e: Error) => void) = () => {}
-    const gate = new Promise<never>((_resolve, reject) => { fail = reject })
+    const { promise: gate, reject: fail } = Promise.withResolvers<never>()
 
     const failing = policy.execute(async () => await gate).catch((e: unknown) => (e as Error).message)
     await drain()

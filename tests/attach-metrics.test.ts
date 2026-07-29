@@ -72,8 +72,7 @@ describe('attachMetrics()', () => {
     await rl.execute(() => 'a')
     await assert.rejects(rl.execute(() => 'b'))
 
-    let release: (() => void) = () => {}
-    const gate = new Promise<void>((resolve) => { release = resolve })
+    const { promise: gate, resolve: release } = Promise.withResolvers<void>()
     const slow = bh.execute(async () => { await gate })
     await drain()
     await assert.rejects(bh.execute(() => 'x'))
