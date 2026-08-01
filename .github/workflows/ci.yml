@@ -34,6 +34,13 @@ jobs:
       - name: Type check
         run: npm run check:types
 
+      # The published .d.ts is read by both compilers, so both must agree on
+      # it. TypeScript 7 runs alongside rather than replacing 6: the tooling
+      # that consumes the compiler API (typescript-eslint, the rollup
+      # plugins) needs 6 until the 7.x programmatic API is stable.
+      - name: Type check (TypeScript 7)
+        run: npm run check:types:next
+
       - name: Unit tests (with coverage)
         run: npm run test:coverage
 
