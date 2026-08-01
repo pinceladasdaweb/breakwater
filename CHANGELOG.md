@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 0.6.0 (2026-08-01)
+
+* fix: report one metrics name per policy when a registry entry is renamed by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/818ea9d9182490a3cdc3903ba0a8b8312dc0f0cc)
+* refactor: drop two unreachable guards that mutation testing exposed by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/11ee256d9f08883d75ba60d603fa8ba99e02fc6a)
+* test: add Stryker mutation testing and close the gaps it found by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/7c8f0c786da71919bff09c14db3a1890be200a83)
+
+
 ## 0.5.4 (2026-07-29)
 
 * test: use Promise.withResolvers for deferred gates by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/1ef59fe1355e55143ddad780751ea9f2e939c85c)
