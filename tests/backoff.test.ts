@@ -10,8 +10,8 @@ describe('fixed()', () => {
     assert.equal(backoff(5), 200)
   })
 
-  test('rejects negative delays', () => {
-    assert.throws(() => fixed(-1), RangeError)
+  test('rejects negative delays, naming the option', () => {
+    assert.throws(() => fixed(-1), { name: 'RangeError', message: /delay/ })
   })
 })
 
@@ -22,6 +22,11 @@ describe('linear()', () => {
     assert.equal(backoff(2), 150)
     assert.equal(backoff(3), 200)
     assert.equal(backoff(4), 220)
+  })
+
+  test('rejects negative options, naming the offending one', () => {
+    assert.throws(() => linear({ initial: -1, increment: 10 }), { name: 'RangeError', message: /initial/ })
+    assert.throws(() => linear({ initial: 10, increment: -1 }), { name: 'RangeError', message: /increment/ })
   })
 })
 
@@ -41,20 +46,24 @@ describe('exponential()', () => {
     assert.equal(backoff(3), 900)
   })
 
-  test('full jitter stays within [0, delay]', () => {
+  test('full jitter spreads across [0, delay]', () => {
     const backoff = exponential({ initial: 100, jitter: 'full' })
-    for (let i = 0; i < 100; i++) {
-      const delay = backoff(3) // deterministic base: 400
-      assert.ok(delay >= 0 && delay <= 400, `delay ${delay} out of range`)
-    }
+    const delays = Array.from({ length: 200 }, () => backoff(3)) // deterministic base: 400
+
+    for (const delay of delays) assert.ok(delay >= 0 && delay <= 400, `delay ${delay} out of range`)
+    // Spread, not just bounded: a jitter clustered at one end would still fit
+    // the range while doing nothing about thundering herds.
+    assert.ok(Math.max(...delays) > 200, 'jitter never reached the upper half')
+    assert.ok(Math.min(...delays) < 200, 'jitter never reached the lower half')
   })
 
-  test('equal jitter stays within [delay/2, delay]', () => {
+  test('equal jitter spreads across [delay/2, delay]', () => {
     const backoff = exponential({ initial: 100, jitter: 'equal' })
-    for (let i = 0; i < 100; i++) {
-      const delay = backoff(3) // deterministic base: 400
-      assert.ok(delay >= 200 && delay <= 400, `delay ${delay} out of range`)
-    }
+    const delays = Array.from({ length: 200 }, () => backoff(3)) // deterministic base: 400
+
+    for (const delay of delays) assert.ok(delay >= 200 && delay <= 400, `delay ${delay} out of range`)
+    assert.ok(Math.max(...delays) > 300, 'jitter never reached the upper half')
+    assert.ok(Math.min(...delays) < 300, 'jitter never reached the lower half')
   })
 
   test('defaults are sane: initial 100, factor 2, max 30s, full jitter', () => {
@@ -65,7 +74,8 @@ describe('exponential()', () => {
     }
   })
 
-  test('rejects a non-positive factor', () => {
-    assert.throws(() => exponential({ factor: 0 }), RangeError)
+  test('rejects invalid options, naming the offending one', () => {
+    assert.throws(() => exponential({ factor: 0 }), { name: 'RangeError', message: /factor/ })
+    assert.throws(() => exponential({ initial: -1 }), { name: 'RangeError', message: /initial/ })
   })
 })

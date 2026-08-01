@@ -72,11 +72,10 @@ export function timeout (ms: number, options: TimeoutOptions = {}): TimeoutPolic
       const promise = Promise.resolve(fn({ ...ctx, signal }))
 
       if (mode === 'aggressive') {
-        // The orphaned execution must never crash the process with an
-        // unhandled rejection after we have already given up on it.
-        promise.catch(() => {})
         // Race the composite so external cancellation also rejects promptly
         // (the whole point of aggressive is not trusting fn to observe it).
+        // Racing also marks the abandoned execution as handled, so a
+        // rejection arriving after we gave up cannot reach the process.
         return await Promise.race([promise, rejectOnAbort(signal)])
       }
 

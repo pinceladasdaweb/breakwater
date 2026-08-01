@@ -41,6 +41,25 @@ describe('createEmitter', () => {
     assert.equal(pings.mock.callCount(), 0)
   })
 
+  test('off() for an event nobody ever subscribed is a no-op', () => {
+    const emitter = createEmitter<TestEvents>()
+
+    assert.doesNotThrow(() => emitter.off('ping', () => {}))
+  })
+
+  test('without a custom reporter, a throwing listener goes to console.error', (t) => {
+    // Silence the intentional report and assert it happened instead of
+    // letting the stack trace pollute the test output.
+    const reported = t.mock.method(console, 'error', () => {})
+    const emitter = createEmitter<TestEvents>()
+    emitter.on('ping', () => { throw new Error('listener boom') })
+
+    assert.doesNotThrow(() => emitter.emit('ping', { count: 1 }))
+
+    assert.equal(reported.mock.callCount(), 1)
+    assert.match(String(reported.mock.calls[0]?.arguments[0]), /event listener threw/)
+  })
+
   test('a throwing listener does not break emit or other listeners', () => {
     const errors: unknown[] = []
     const emitter = createEmitter<TestEvents>((error) => errors.push(error))

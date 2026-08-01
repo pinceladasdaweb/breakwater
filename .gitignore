@@ -1,5 +1,7 @@
 node_modules/
 dist/
+reports/
+.stryker-tmp/
 .env
 .DS_Store
 .vscode/

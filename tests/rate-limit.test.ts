@@ -5,11 +5,11 @@ import { rateLimit } from '../src/rate-limit/rate-limit'
 import { isRateLimitedError } from '../src/errors'
 
 describe('rateLimit() options', () => {
-  test('rejects invalid options', () => {
-    assert.throws(() => rateLimit({ limit: 0, interval: 1_000 }), RangeError)
-    assert.throws(() => rateLimit({ limit: 1.5, interval: 1_000 }), RangeError)
-    assert.throws(() => rateLimit({ limit: 10, interval: 0 }), RangeError)
-    assert.throws(() => rateLimit({ limit: 10, interval: 1_000, burst: 0 }), RangeError)
+  test('rejects invalid options, naming the offending one', () => {
+    assert.throws(() => rateLimit({ limit: 0, interval: 1_000 }), { name: 'RangeError', message: /limit/ })
+    assert.throws(() => rateLimit({ limit: 1.5, interval: 1_000 }), { name: 'RangeError', message: /limit/ })
+    assert.throws(() => rateLimit({ limit: 10, interval: 0 }), { name: 'RangeError', message: /interval/ })
+    assert.throws(() => rateLimit({ limit: 10, interval: 1_000, burst: 0 }), { name: 'RangeError', message: /burst/ })
   })
 })
 
@@ -29,6 +29,23 @@ describe('token bucket (default)', () => {
       assert.equal(error.retryable, true)
       assert.equal(error.retryAfterMs, 100) // 1 token every 100ms
       assert.equal(error.stats.remaining, 0)
+      return true
+    })
+  })
+
+  test('retryAfterMs discounts the tokens already refilled', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'] })
+    t.mock.timers.setTime(1_000_000)
+    const policy = rateLimit({ limit: 10, interval: 1_000, burst: 1 }) // one token per 100ms
+
+    await policy.execute(() => 'a')
+    t.mock.timers.tick(50) // half a token is already back
+
+    await assert.rejects(policy.execute(() => 'x'), (error: unknown) => {
+      assert.ok(isRateLimitedError(error))
+      // Half the wait has been served: telling the caller to wait 100ms again
+      // would throttle it below the configured rate.
+      assert.equal(error.retryAfterMs, 50)
       return true
     })
   })
@@ -56,6 +73,21 @@ describe('token bucket (default)', () => {
 
     assert.equal(await policy.execute(() => 'a'), 'a')
     assert.equal(await policy.execute(() => 'b'), 'b')
+    await assert.rejects(policy.execute(() => 'x'), isRateLimitedError)
+  })
+
+  test('refills at limit/interval, not a whole bucket at a time', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'] })
+    t.mock.timers.setTime(1_000_000)
+    // 10 per second (one token every 100ms), burst of 3.
+    const policy = rateLimit({ limit: 10, interval: 1_000, burst: 3 })
+
+    for (const id of ['a', 'b', 'c']) await policy.execute(() => id)
+    await assert.rejects(policy.execute(() => 'x'), isRateLimitedError)
+
+    t.mock.timers.tick(100)
+    assert.equal(policy.stats().remaining, 1)
+    assert.equal(await policy.execute(() => 'd'), 'd')
     await assert.rejects(policy.execute(() => 'x'), isRateLimitedError)
   })
 
@@ -94,6 +126,20 @@ describe('sliding window', () => {
     await assert.rejects(policy.execute(() => 'x'), isRateLimitedError)
   })
 
+  test('remaining bottoms out at zero, never below', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'] })
+    t.mock.timers.setTime(1_000_000)
+    const policy = rateLimit({ limit: 2, interval: 1_000, strategy: 'sliding-window' })
+
+    await policy.execute(() => 'a')
+    await policy.execute(() => 'b')
+    assert.equal(policy.stats().remaining, 0)
+
+    // A dashboard reading a saturated limiter must never see a negative quota.
+    await assert.rejects(policy.execute(() => 'x'), isRateLimitedError)
+    assert.equal(policy.stats().remaining, 0)
+  })
+
   test('remaining reflects live occupancy of the window', async (t) => {
     t.mock.timers.enable({ apis: ['Date'] })
     t.mock.timers.setTime(1_000_000)
@@ -113,19 +159,20 @@ describe('clock and float-precision hardening', () => {
   test('waiting exactly retryAfterMs is always sufficient (float rounding)', async (t) => {
     t.mock.timers.enable({ apis: ['Date'] })
     t.mock.timers.setTime(1_000_000)
-    // Configuration reproduced from the review: naive ceil((1-tokens)/rate)
-    // landed one millisecond short here.
-    const policy = rateLimit({ limit: 1, interval: 8_737, burst: 1 })
+    // 1/161 cannot be represented exactly: 161 * (1/161) is 0.999…, so the
+    // naive ceil((1 - tokens) / rate) lands one millisecond short here and
+    // the answer has to be verified against the arithmetic the next call
+    // will actually run.
+    const policy = rateLimit({ limit: 1, interval: 161, burst: 1 })
 
     await policy.execute(() => 'a')
-    let retryAfterMs = 0
     await assert.rejects(policy.execute(() => 'x'), (error: unknown) => {
       assert.ok(isRateLimitedError(error))
-      retryAfterMs = error.retryAfterMs
+      assert.equal(error.retryAfterMs, 162)
       return true
     })
 
-    t.mock.timers.tick(retryAfterMs)
+    t.mock.timers.tick(162)
     assert.equal(await policy.execute(() => 'b'), 'b')
   })
 

@@ -41,16 +41,20 @@ const isPolicy = (value: ResilienceOptions | Policy): value is Policy => {
 }
 
 /**
- * The registry name becomes the default `name` of the pipeline and of the
- * inner policies that report to metrics — executions, retries, timeouts and
- * rejections come out identified without any per-policy wiring. Explicit
- * names always win.
+ * The registry name becomes the default `name` of the pipeline, so
+ * executions, retries, timeouts and rejections come out identified without
+ * any per-policy wiring — resilience() already falls back to it for every
+ * inner policy. Explicit names always win.
+ *
+ * The breaker is the exception: its name is the key its state lives under, so
+ * a shared store needs the registry name even when the pipeline reports under
+ * a different display name.
  */
 const withDefaultNames = (name: string, options: ResilienceOptions): ResilienceOptions => ({
-  name,
   ...options,
-  ...(options.rateLimit !== undefined && { rateLimit: { name, ...options.rateLimit } }),
-  ...(options.bulkhead !== undefined && { bulkhead: { name, ...options.bulkhead } }),
+  // An absent name and an explicit `undefined` mean the same thing here: no
+  // name was chosen, so the registry key stands in.
+  name: options.name ?? name,
   ...(options.circuitBreaker !== undefined && { circuitBreaker: { name, ...options.circuitBreaker } })
 })
 

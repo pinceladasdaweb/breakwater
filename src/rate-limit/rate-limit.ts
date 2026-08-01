@@ -122,10 +122,10 @@ function slidingWindow (limit: number, interval: number): Limiter {
         return ADMITTED
       }
 
-      // Sufficient by construction, as in the token bucket.
-      let wait = Math.max(1, Math.ceil(oldestAt + interval - now))
-      while (now + wait - oldestAt < interval) wait++
-      return wait
+      // No verification loop here, unlike the token bucket: this window only
+      // adds and subtracts timestamps, so rounding the difference up is
+      // already sufficient — there is no division to accumulate error.
+      return Math.max(1, Math.ceil(oldestAt + interval - now))
     },
     remaining (rawNow) {
       const now = clamp(rawNow)

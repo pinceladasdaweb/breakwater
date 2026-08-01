@@ -120,6 +120,55 @@ describe('attachMetrics()', () => {
     const detach = attachMetrics(custom, recordingCollector([]))
     detach()
   })
+
+  test('a policy that declares a kind but exposes no events is skipped too', () => {
+    const opaque = { ...basePolicy(async (fn, ctx) => await fn(ctx)), kind: 'retry' as const }
+
+    const detach = attachMetrics(opaque, recordingCollector([]))
+    detach()
+  })
+
+  test('a collector that implements nothing never breaks a pipeline', async (t) => {
+    // Every MetricsCollector callback is optional: wiring a collector that
+    // only cares about one signal must not crash the policies around it.
+    // Listener failures are swallowed by design, so watch the reporter too —
+    // otherwise a crash in every callback would look like success here.
+    const reported = t.mock.method(console, 'error', () => {})
+    const empty: MetricsCollector = {}
+    const pipeline = compose(
+      metricsPolicy(empty),
+      fallback('rescued'),
+      retry({ attempts: 2, backoff: fixed(0) }),
+      rateLimit({ limit: 5, interval: 60_000 }),
+      bulkhead({ concurrency: 1 }),
+      circuitBreaker({ consecutiveFailures: 1 })
+    )
+    attachMetrics(pipeline, empty)
+
+    assert.equal(await pipeline.execute(() => 'ok'), 'ok')
+    assert.equal(await pipeline.execute(() => { throw new Error('down') }), 'rescued')
+
+    assert.equal(reported.mock.callCount(), 0)
+  })
+
+  test('a collector that implements nothing survives a timeout too', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const reported = t.mock.method(console, 'error', () => {})
+    const policy = timeout(50)
+    attachMetrics(policy, {})
+
+    const promise = policy.execute(async ({ signal }) => {
+      return await new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+      })
+    })
+    const assertion = assert.rejects(promise)
+    await drain()
+    t.mock.timers.tick(50)
+    await assertion
+
+    assert.equal(reported.mock.callCount(), 0)
+  })
 })
 
 describe('metricsPolicy()', () => {
@@ -135,6 +184,17 @@ describe('metricsPolicy()', () => {
 
     assert.equal(reported.mock.callCount(), 2)
     assert.match(String(reported.mock.calls[0]?.arguments[0]), /metrics collector threw/)
+  })
+
+  test('the reported duration is how long the pipeline took', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'] })
+    t.mock.timers.setTime(1_000_000)
+    const durations: number[] = []
+    const policy = metricsPolicy({ onExecution: (e) => durations.push(e.durationMs) })
+
+    await policy.execute(() => { t.mock.timers.tick(75); return 'ok' })
+
+    assert.deepEqual(durations, [75])
   })
 
   test('reports success and failure with total pipeline duration', async () => {
@@ -187,6 +247,16 @@ describe('aggregated stats()', () => {
     assert.deepEqual(kinds, ['rateLimit', 'circuitBreaker'])
   })
 
+  test('resilience() only builds the policies it was asked for', async () => {
+    const { resilience } = await import('../src/compose/resilience')
+    const policy = resilience({ rateLimit: { limit: 5, interval: 1_000 } })
+
+    await policy.execute(() => 'ok')
+
+    // No breaker was configured, so none is silently inserted.
+    assert.deepEqual(policy.stats().map((e) => e.kind), ['rateLimit'])
+  })
+
   test('composed pipelines expose their inner policies for introspection, frozen', () => {
     const to = timeout(1_000)
     const rt = retry()
@@ -194,6 +264,18 @@ describe('aggregated stats()', () => {
 
     assert.deepEqual([...pipeline.policies], [rt, to])
     assert.ok(Object.isFrozen(pipeline.policies))
+  })
+
+  test('a foreign policy claiming to be a composition cannot corrupt the aggregate', () => {
+    // Third-party policies pick their own `kind`; one calling itself
+    // 'compose' must still return a list of entries or be skipped.
+    const impostor = {
+      ...basePolicy(async (fn, ctx) => await fn(ctx)),
+      kind: 'compose' as const,
+      stats: () => 'not a list of entries'
+    }
+
+    assert.deepEqual(compose(impostor).stats(), [])
   })
 
   test('a stats-bearing custom policy without kind aggregates as custom', async () => {

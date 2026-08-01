@@ -7,10 +7,25 @@ import { isTimeoutError, TimeoutError } from '../src/errors'
 import { drain } from './helpers'
 
 describe('timeout()', () => {
-  test('rejects invalid ms', () => {
-    assert.throws(() => timeout(0), RangeError)
-    assert.throws(() => timeout(-5), RangeError)
-    assert.throws(() => timeout(Infinity), RangeError)
+  test('rejects invalid ms, naming the option', () => {
+    assert.throws(() => timeout(0), { name: 'RangeError', message: /timeout ms/ })
+    assert.throws(() => timeout(-5), { name: 'RangeError', message: /timeout ms/ })
+    assert.throws(() => timeout(Infinity), { name: 'RangeError', message: /timeout ms/ })
+  })
+
+  test('an AbortError-shaped domain failure is not rewritten as a timeout', async () => {
+    const policy = timeout(1_000)
+    const events: unknown[] = []
+    policy.on('timeout', (e) => events.push(e))
+    // A driver that names its own errors AbortError, failing well before the
+    // deadline: nothing was aborted here, so nothing may be normalized.
+    const lookalike = new DOMException('the socket aborted', 'AbortError')
+
+    await assert.rejects(policy.execute(() => { throw lookalike }), (error: unknown) => {
+      assert.equal(error, lookalike)
+      return true
+    })
+    assert.equal(events.length, 0)
   })
 
   test('resolves normally when the function finishes in time', async () => {
@@ -33,6 +48,9 @@ describe('timeout()', () => {
       assert.ok(isTimeoutError(error))
       assert.equal(error.ms, 50)
       assert.equal(error.mode, 'cooperative')
+      // The function rejected with our own abort reason: surface that error,
+      // never a second TimeoutError wrapping the first.
+      assert.equal(error.cause, undefined)
       return true
     })
 
@@ -45,6 +63,8 @@ describe('timeout()', () => {
   test('cooperative: a function that rejects with its own abort error is normalized to TimeoutError with cause', async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] })
     const policy = timeout(50)
+    const events: Array<{ ms: number }> = []
+    policy.on('timeout', (e) => events.push({ ms: e.ms }))
     // What fetch and friends reject with when their signal aborts.
     const abortError = new DOMException('The operation was aborted', 'AbortError')
 
@@ -62,6 +82,7 @@ describe('timeout()', () => {
     await drain()
     t.mock.timers.tick(50)
     await assertion
+    assert.deepEqual(events, [{ ms: 50 }])
   })
 
   test('cooperative: a function that ignores the signal and resolves later still succeeds, with no timeout event', async (t) => {
@@ -163,6 +184,43 @@ describe('timeout()', () => {
     t.mock.timers.tick(50)
     await assertion
     assert.equal(finished, false)
+  })
+
+  test('aggressive: the abandoned execution failing later never reaches the process', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const policy = timeout(50, { mode: 'aggressive' })
+
+    const promise = policy.execute(async () => {
+      return await new Promise((_resolve, reject) =>
+        setTimeout(() => reject(new Error('orphan exploded')), 1_000))
+    })
+    const assertion = assert.rejects(promise, isTimeoutError)
+
+    await drain()
+    t.mock.timers.tick(50)
+    await assertion
+
+    // We already gave up on this call; its rejection arriving afterwards must
+    // stay handled instead of surfacing as an unhandled rejection, which
+    // node:test would report as a failure of this file.
+    t.mock.timers.tick(1_000)
+    await drain()
+  })
+
+  test('aggressive: a function that cancels itself before yielding rejects at once', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const policy = timeout(30_000, { mode: 'aggressive' })
+    const controller = new AbortController()
+
+    const promise = policy.execute(() => {
+      // Aborts synchronously, so the signal is already aborted by the time
+      // the policy starts watching it.
+      controller.abort(new Error('gave up before starting'))
+      return new Promise(() => {}) // and then never settles
+    }, { signal: controller.signal })
+
+    // Resolves without ticking the 30s timer.
+    await assert.rejects(promise, /gave up before starting/)
   })
 
   test('failures unrelated to the timeout pass through untouched', async () => {
