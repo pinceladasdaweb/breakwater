@@ -55,9 +55,8 @@ Semantics that keep configuration honest:
 
 ## Names flow into metrics automatically
 
-The registry name becomes the default `name` of the pipeline and of the inner
-circuit breaker, bulkhead and rate limit — executions, retries, timeouts,
-rejections and state changes come out of your
+The registry name becomes the default `name` of the pipeline — executions,
+retries, timeouts, rejections and state changes come out of your
 [`MetricsCollector`](observability.md) identified without per-policy wiring:
 
 ```ts
@@ -68,7 +67,20 @@ policies.define('partner-quota', {
 // collector.onReject receives { policy: 'rateLimit', name: 'partner-quota', ... }
 ```
 
-An explicit inner `name` always wins over the registry name.
+Explicit names always win, from the outside in: a top-level `name` relabels
+the whole pipeline, and an inner `name` relabels just that policy.
+
+```ts
+policies.define('partner-quota', {
+  name: 'Partner API',                                  // every metric says 'Partner API'
+  rateLimit: { limit: 100, interval: 60_000, name: 'quota' } // except this one: 'quota'
+})
+```
+
+The circuit breaker is the one exception: whatever it reports to metrics, its
+state is always keyed by the registry name, so a
+[shared state store](circuit-breaker.md#pluggable-state-statestore) recognises the same
+circuit across instances and restarts even if you rename the pipeline.
 
 Entries built from `resilience()` options also expose the
 [aggregated `stats()`](observability.md#aggregated-stats-on-compositions) —

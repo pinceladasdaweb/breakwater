@@ -6,6 +6,8 @@ import { compose } from '../src/compose/compose'
 import { retry } from '../src/retry/retry'
 import { timeout } from '../src/timeout/timeout'
 import { fixed } from '../src/retry/backoff'
+import { countWindow } from '../src/circuit-breaker/window'
+import { memoryStore, type StateStore } from '../src/circuit-breaker/state-store'
 import { type MetricsCollector } from '../src/metrics/collector'
 
 describe('define and get', () => {
@@ -60,18 +62,40 @@ describe('define and get', () => {
     assert.throws(() => registry.define('bad', { retry: { attempts: 0 } }), RangeError)
     assert.equal(registry.has('bad'), false)
   })
+
+  test('an object missing any part of the Policy contract is treated as configuration', async () => {
+    const impostor = {
+      execute: async () => 'from the impostor',
+      wrap: () => async () => 'from the impostor',
+      invoke: async () => 'from the impostor'
+    }
+
+    for (const missing of ['execute', 'wrap', 'invoke'] as const) {
+      const registry = createPolicyRegistry()
+      const partial = { ...impostor, [missing]: undefined }
+
+      const built = registry.define('half', partial as never)
+      assert.equal(
+        await built.execute(() => 'real'),
+        'real',
+        `an object without ${missing} must not pass as a policy`
+      )
+    }
+  })
 })
 
 describe('naming rules', () => {
   test('defining the same name twice throws', () => {
     const registry = createPolicyRegistry()
     registry.define('api', {})
-    assert.throws(() => registry.define('api', {}), /already defined/)
+    assert.throws(() => registry.define('api', {}), { name: 'RangeError', message: /already defined/ })
   })
 
-  test('rejects empty names', () => {
+  test('rejects names that are not usable strings', () => {
     const registry = createPolicyRegistry()
-    assert.throws(() => registry.define('', {}), RangeError)
+    assert.throws(() => registry.define('', {}), { name: 'RangeError', message: /policy name/ })
+    // JavaScript callers get past the type system: guard the runtime too.
+    assert.throws(() => registry.define(42 as never, {}), { name: 'RangeError', message: /policy name/ })
   })
 
   test('get of an unknown name throws listing the known names', () => {
@@ -79,12 +103,12 @@ describe('naming rules', () => {
     registry.define('payments', {})
     registry.define('catalog', {})
 
-    assert.throws(() => registry.get('paymnets'), /unknown policy "paymnets".*payments, catalog/)
+    assert.throws(() => registry.get('paymnets'), { name: 'RangeError', message: /unknown policy "paymnets".*payments, catalog/ })
   })
 
   test('get on an empty registry says none are defined', () => {
     const registry = createPolicyRegistry()
-    assert.throws(() => registry.get('anything'), /\(none defined\)/)
+    assert.throws(() => registry.get('anything'), { name: 'RangeError', message: /\(none defined\)/ })
   })
 
   test('define never mutates the caller options object', () => {
@@ -123,6 +147,65 @@ describe('naming rules', () => {
     assert.deepEqual(executions, ['no-breaker'])
   })
 
+  test('the registry name is the key the breaker uses in a shared state store', async () => {
+    const registry = createPolicyRegistry()
+    const inner = memoryStore({ window: countWindow(10) })
+    const keys = new Set<string>()
+    const store: StateStore = {
+      ...inner,
+      getState: (name) => { keys.add(name); return inner.getState(name) }
+    }
+
+    registry.define('orders-api', { circuitBreaker: { consecutiveFailures: 1, stateStore: store } })
+    await registry.get('orders-api').execute(() => 'ok')
+
+    // Without a stable key, a distributed store could never recognise this
+    // circuit across instances or restarts.
+    assert.deepEqual([...keys], ['orders-api'])
+  })
+
+  test('an explicit undefined name falls back to the registry key', async () => {
+    const registry = createPolicyRegistry()
+    const names: Array<string | undefined> = []
+    const metrics: MetricsCollector = { onReject: (e) => names.push(e.name) }
+
+    // What `{ name: config.displayName, ... }` produces when displayName is
+    // not set: absent and explicitly undefined must behave the same.
+    registry.define('orders', { name: undefined, rateLimit: { limit: 1, interval: 60_000 }, metrics })
+    const policy = registry.get('orders')
+
+    await policy.execute(() => 'a')
+    await assert.rejects(policy.execute(() => 'b'))
+
+    assert.deepEqual(names, ['orders'])
+  })
+
+  test('an explicit pipeline name identifies every policy, registry key included', async () => {
+    const registry = createPolicyRegistry()
+    const seen: string[] = []
+    const metrics: MetricsCollector = {
+      onExecution: (e) => seen.push(`execution:${e.name ?? ''}`),
+      onReject: (e) => seen.push(`reject:${e.name ?? ''}`)
+    }
+
+    registry.define('registry-key', {
+      name: 'explicit-pipeline',
+      rateLimit: { limit: 1, interval: 60_000 },
+      metrics
+    })
+    const policy = registry.get('registry-key')
+
+    await policy.execute(() => 'a')
+    await assert.rejects(policy.execute(() => 'b'))
+
+    // One policy must never show up under two names in a dashboard.
+    assert.deepEqual(seen, [
+      'execution:explicit-pipeline',
+      'reject:explicit-pipeline',
+      'execution:explicit-pipeline'
+    ])
+  })
+
   test('an explicit inner name wins over the registry name', async () => {
     const registry = createPolicyRegistry()
     const rejections: Array<string | undefined> = []
@@ -157,7 +240,12 @@ describe('central configuration', () => {
 
     assert.throws(
       () => registry.defineAll({ good: {}, bad: { retry: { attempts: 0 } }, never: {} }),
-      /policy "bad".*attempts/
+      (error: unknown) => {
+        assert.match((error as Error).message, /policy "bad".*attempts/)
+        // The key-prefixed message wraps the original, it does not replace it.
+        assert.ok((error as Error).cause instanceof RangeError)
+        return true
+      }
     )
     assert.equal(registry.has('good'), true)
     assert.equal(registry.has('bad'), false)
