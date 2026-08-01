@@ -6,7 +6,7 @@ import { isFallbackFailedError } from '../src/errors'
 
 describe('fallback()', () => {
   test('requires at least one handler', () => {
-    assert.throws(() => fallback([]), RangeError)
+    assert.throws(() => fallback([]), { name: 'RangeError', message: /at least one handler/ })
   })
 
   test('is transparent on success', async () => {

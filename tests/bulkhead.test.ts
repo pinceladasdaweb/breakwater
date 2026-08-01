@@ -22,11 +22,11 @@ function gated (): { fn: () => Promise<string>, release: () => void, running: ()
 }
 
 describe('bulkhead() options', () => {
-  test('rejects invalid options', () => {
-    assert.throws(() => bulkhead({ concurrency: 0 }), RangeError)
-    assert.throws(() => bulkhead({ concurrency: 1.5 }), RangeError)
-    assert.throws(() => bulkhead({ queue: -1 }), RangeError)
-    assert.throws(() => bulkhead({ queue: 0.5 }), RangeError)
+  test('rejects invalid options, naming the offending one', () => {
+    assert.throws(() => bulkhead({ concurrency: 0 }), { name: 'RangeError', message: /concurrency/ })
+    assert.throws(() => bulkhead({ concurrency: 1.5 }), { name: 'RangeError', message: /concurrency/ })
+    assert.throws(() => bulkhead({ queue: -1 }), { name: 'RangeError', message: /queue/ })
+    assert.throws(() => bulkhead({ queue: 0.5 }), { name: 'RangeError', message: /queue/ })
   })
 })
 
@@ -163,6 +163,36 @@ describe('queue', () => {
     g.release()
     await first
     assert.equal(await replacement, 'replacement')
+  })
+
+  test('aborting a waiter in the middle of the queue removes that one', async () => {
+    const policy = bulkhead({ concurrency: 1, queue: 3 })
+    const controller = new AbortController()
+    const g = gated()
+    const order: string[] = []
+
+    const blocker = policy.execute(g.fn)
+    await drain()
+
+    const first = policy.execute(() => { order.push('first'); return 'first' })
+    const cancelled = policy.execute(
+      () => { order.push('cancelled'); return 'x' },
+      { signal: controller.signal }
+    )
+    const last = policy.execute(() => { order.push('last'); return 'last' })
+    await drain()
+    const assertion = assert.rejects(cancelled, /gave up waiting/)
+
+    controller.abort(new Error('gave up waiting'))
+    await assertion
+    assert.equal(policy.stats().queued, 2)
+
+    g.release()
+    await blocker
+    assert.equal(await first, 'first')
+    assert.equal(await last, 'last')
+    // Neither neighbour was evicted in its place.
+    assert.deepEqual(order, ['first', 'last'])
   })
 
   test('an already-aborted signal rejects before consuming slot or queue', async () => {

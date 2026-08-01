@@ -24,7 +24,7 @@ function probe (label: string, log: string[]): Policy {
 
 describe('compose()', () => {
   test('requires at least one policy', () => {
-    assert.throws(() => compose(), RangeError)
+    assert.throws(() => compose(), { name: 'RangeError', message: /at least one policy/ })
   })
 
   test('runs policies outermost-first, exactly like nested calls', async () => {

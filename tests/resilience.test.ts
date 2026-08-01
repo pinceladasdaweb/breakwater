@@ -29,6 +29,28 @@ describe('resilience()', () => {
     await assertion
   })
 
+  test('accepts the object form of timeout and wires it to metrics', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const timeouts: Array<{ ms: number, name?: string }> = []
+    const policy = resilience({
+      name: 'slow-api',
+      timeout: { ms: 50, mode: 'aggressive' },
+      metrics: { onTimeout: (e) => timeouts.push({ ms: e.ms, name: e.name }) }
+    })
+
+    const promise = policy.execute(async () => await new Promise(() => {})) // ignores the signal
+    const assertion = assert.rejects(promise, (error: unknown) => {
+      assert.ok(isTimeoutError(error))
+      assert.equal(error.mode, 'aggressive')
+      return true
+    })
+
+    await drain()
+    t.mock.timers.tick(50)
+    await assertion
+    assert.deepEqual(timeouts, [{ ms: 50, name: 'slow-api' }])
+  })
+
   test('default order: retry wraps the breaker, fallback catches the give-up', async () => {
     const policy = resilience({
       retry: { attempts: 2, backoff: fixed(0) },
@@ -46,10 +68,10 @@ describe('resilience()', () => {
   test('wires a MetricsCollector to every policy without manual setup', async () => {
     const seen: string[] = []
     const collector: MetricsCollector = {
-      onExecution: (e) => seen.push(`execution:${e.outcome}:${e.policy}`),
-      onRetry: (e) => seen.push(`retry:${e.attempt}`),
+      onExecution: (e) => seen.push(`execution:${e.outcome}:${e.policy}:${e.name ?? ''}`),
+      onRetry: (e) => seen.push(`retry:${e.attempt}:${e.name ?? ''}`),
       onStateChange: (e) => seen.push(`state:${e.from}->${e.to}:${e.name ?? ''}`),
-      onFallback: (e) => seen.push(`fallback:${e.handlerIndex}`)
+      onFallback: (e) => seen.push(`fallback:${e.handlerIndex}:${e.name ?? ''}`)
     }
 
     const policy = resilience({
@@ -62,11 +84,12 @@ describe('resilience()', () => {
     const result = await policy.execute(() => { throw new Error('down') })
 
     assert.equal(result, 'stale')
+    // Every policy reports under the same pipeline name without any wiring.
     assert.deepEqual(seen, [
-      'retry:1',
+      'retry:1:payments',
       'state:closed->open:payments',
-      'fallback:0',
-      'execution:success:resilience'
+      'fallback:0:payments',
+      'execution:success:resilience:payments'
     ])
   })
 
@@ -93,15 +116,15 @@ describe('resilience()', () => {
     const policy = resilience({
       bulkhead: { concurrency: 1 },
       circuitBreaker: { consecutiveFailures: 10, name: 'guarded' },
-      metrics: { onReject: (e) => rejections.push(`${e.policy}:${e.reason}`) }
+      metrics: { onReject: (e) => rejections.push(`${e.policy}:${e.reason}:${e.name ?? ''}`) }
     })
 
     const { promise: gate, resolve: release } = Promise.withResolvers<void>()
     const slow = policy.execute(async () => { await gate; return 'slow' })
-    for (let i = 0; i < 10; i++) await Promise.resolve()
+    await drain()
 
     await assert.rejects(policy.execute(() => 'overflow'), isBulkheadRejectedError)
-    assert.deepEqual(rejections, ['bulkhead:bulkhead_full'])
+    assert.deepEqual(rejections, ['bulkhead:bulkhead_full:guarded'])
 
     release()
     assert.equal(await slow, 'slow')

@@ -2,13 +2,27 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { circuitBreaker } from '../src/circuit-breaker/circuit-breaker'
-import { memoryStore } from '../src/circuit-breaker/state-store'
+import { memoryStore, type StateStore } from '../src/circuit-breaker/state-store'
 import { countWindow, timeWindow } from '../src/circuit-breaker/window'
 import { isCircuitOpenError, isIsolatedError } from '../src/errors'
 
 import { drain } from './helpers'
 
 const boom = (): never => { throw new Error('downstream failure') }
+
+/** A memory store whose every method answers asynchronously, like a remote one. */
+function asyncStore (): StateStore {
+  const inner = memoryStore({ window: countWindow(10) })
+  return {
+    getState: async (name) => inner.getState(name),
+    transition: async (name, from, to) => inner.transition(name, from, to),
+    recordSuccess: async (name, ms) => { inner.recordSuccess(name, ms) },
+    recordFailure: async (name, ms) => { inner.recordFailure(name, ms) },
+    getCounters: async (name) => inner.getCounters(name),
+    resetCounters: async (name) => { inner.resetCounters(name) },
+    acquireProbe: async () => true
+  }
+}
 
 async function failTimes (policy: { execute: (fn: () => unknown) => Promise<unknown> }, times: number): Promise<void> {
   for (let i = 0; i < times; i++) {
@@ -17,22 +31,43 @@ async function failTimes (policy: { execute: (fn: () => unknown) => Promise<unkn
 }
 
 describe('window validation', () => {
-  test('rejects invalid windows', () => {
-    assert.throws(() => countWindow(0), RangeError)
-    assert.throws(() => countWindow(1.5), RangeError)
-    assert.throws(() => timeWindow(0), RangeError)
-    assert.throws(() => timeWindow(-100), RangeError)
+  test('windows describe their own kind and size', () => {
+    assert.deepEqual(countWindow(20), { kind: 'count', size: 20 })
+    assert.deepEqual(timeWindow(500), { kind: 'time', size: 500 })
+  })
+
+  test('rejects invalid windows, naming the offending one', () => {
+    assert.throws(() => countWindow(0), { name: 'RangeError', message: /countWindow size/ })
+    assert.throws(() => countWindow(1.5), { name: 'RangeError', message: /countWindow size/ })
+    assert.throws(() => timeWindow(0), { name: 'RangeError', message: /timeWindow ms/ })
+    assert.throws(() => timeWindow(-100), { name: 'RangeError', message: /timeWindow ms/ })
   })
 })
 
 describe('circuitBreaker() options', () => {
-  test('rejects invalid options', () => {
-    assert.throws(() => circuitBreaker({ failureThreshold: 0 }), RangeError)
-    assert.throws(() => circuitBreaker({ failureThreshold: 1.5 }), RangeError)
-    assert.throws(() => circuitBreaker({ minimumCalls: 0 }), RangeError)
-    assert.throws(() => circuitBreaker({ consecutiveFailures: 0 }), RangeError)
-    assert.throws(() => circuitBreaker({ halfOpenAfter: 0 }), RangeError)
-    assert.throws(() => circuitBreaker({ halfOpenCalls: 0 }), RangeError)
+  test('rejects invalid options, naming the offending one', () => {
+    assert.throws(() => circuitBreaker({ failureThreshold: 0 }), { name: 'RangeError', message: /failureThreshold/ })
+    assert.throws(() => circuitBreaker({ failureThreshold: 1.5 }), { name: 'RangeError', message: /failureThreshold/ })
+    assert.throws(() => circuitBreaker({ minimumCalls: 0 }), { name: 'RangeError', message: /minimumCalls/ })
+    assert.throws(() => circuitBreaker({ consecutiveFailures: 0 }), { name: 'RangeError', message: /consecutiveFailures/ })
+    assert.throws(() => circuitBreaker({ halfOpenAfter: 0 }), { name: 'RangeError', message: /halfOpenAfter/ })
+    assert.throws(() => circuitBreaker({ halfOpenCalls: 0 }), { name: 'RangeError', message: /halfOpenCalls/ })
+  })
+
+  test('a threshold of exactly 1 is valid — open only at a 100% failure rate', () => {
+    assert.doesNotThrow(() => circuitBreaker({ failureThreshold: 1 }))
+  })
+
+  test('a fresh breaker is closed, with empty counters and no open timing', () => {
+    const breaker = circuitBreaker({ consecutiveFailures: 1 })
+    const stats = breaker.stats()
+
+    assert.equal(breaker.state, 'closed')
+    assert.equal(stats.state, 'closed')
+    assert.equal(stats.totalCalls, 0)
+    assert.equal(stats.failureRate, 0)
+    assert.equal(stats.openedAt, undefined)
+    assert.equal(stats.nextAttemptAt, undefined)
   })
 })
 
@@ -94,6 +129,35 @@ describe('failure rate mode', () => {
     await failTimes(breaker, 2) // 2/5 = 0.4 < 0.6
     assert.equal(breaker.state, 'closed')
   })
+
+  test('a rate landing exactly on the threshold opens the circuit', async () => {
+    const breaker = circuitBreaker({
+      failureThreshold: 0.5,
+      minimumCalls: 4,
+      window: countWindow(10)
+    })
+
+    await breaker.execute(() => 'ok')
+    await breaker.execute(() => 'ok')
+    await failTimes(breaker, 2) // exactly 2/4 = 0.5
+
+    assert.equal(breaker.state, 'open')
+  })
+
+  test('a count window only weighs the last N calls', async () => {
+    const breaker = circuitBreaker({
+      failureThreshold: 1,
+      minimumCalls: 2,
+      window: countWindow(2)
+    })
+
+    for (let i = 0; i < 4; i++) await breaker.execute(() => 'ok')
+    await failTimes(breaker, 2)
+
+    // The four successes have fallen out: the window holds two calls, both failed.
+    assert.equal(breaker.stats().totalCalls, 2)
+    assert.equal(breaker.state, 'open')
+  })
 })
 
 describe('half-open', () => {
@@ -140,13 +204,54 @@ describe('half-open', () => {
     t.mock.timers.tick(1_000)
 
     const { promise: gate, resolve: release } = Promise.withResolvers<void>()
+    const rejections: string[] = []
+    breaker.on('reject', ({ reason }) => rejections.push(reason))
 
     const probe = breaker.execute(async () => { await gate; return 'slow probe' })
     await drain() // let the probe fully enter the half-open slot
     await assert.rejects(breaker.execute(() => 'extra'), isCircuitOpenError)
+    assert.deepEqual(rejections, ['circuit_open'])
 
     release()
     assert.equal(await probe, 'slow probe')
+  })
+
+  test('a finished probe hands its slot back to the same half-open period', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    // Two slots, and a majority of two successes to close: the period only
+    // completes if the first probe releases the slot it held.
+    const breaker = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1_000, halfOpenCalls: 2 })
+
+    await failTimes(breaker, 1)
+    t.mock.timers.tick(1_000)
+
+    await breaker.execute(() => 'probe 1')
+    assert.equal(breaker.state, 'half-open')
+    await breaker.execute(() => 'probe 2')
+    assert.equal(breaker.state, 'closed')
+  })
+
+  test('a cancelled probe returns its slot — being cancelled is not probing', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const breaker = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1_000, halfOpenCalls: 2 })
+
+    await failTimes(breaker, 1)
+    t.mock.timers.tick(1_000)
+
+    const controller = new AbortController()
+    const cancelled = breaker.execute(async ({ signal }) => {
+      return await new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+      })
+    }, { signal: controller.signal })
+    await drain()
+    controller.abort(new Error('caller went away'))
+    await assert.rejects(cancelled, /caller went away/)
+
+    // The period is still entitled to its two probes.
+    await breaker.execute(() => 'probe 1')
+    await breaker.execute(() => 'probe 2')
+    assert.equal(breaker.state, 'closed')
   })
 
   test('concurrent arrivals cannot exceed halfOpenCalls probes (admission race)', async (t) => {
@@ -267,6 +372,25 @@ describe('isolate / unisolate / reset', () => {
     })
   })
 
+  test('isolating twice is a no-op — only the first transition is announced', async () => {
+    const breaker = circuitBreaker({})
+    const changes: string[] = []
+    const stateEvents: string[] = []
+    breaker
+      .on('stateChange', ({ from, to }) => changes.push(`${from}->${to}`))
+      .on('open', () => stateEvents.push('open'))
+      .on('close', () => stateEvents.push('close'))
+      .on('halfOpen', () => stateEvents.push('halfOpen'))
+
+    await breaker.isolate()
+    await breaker.isolate()
+
+    assert.equal(breaker.state, 'isolated')
+    assert.deepEqual(changes, ['closed->isolated'])
+    // Isolation is its own state: it borrows no other state's event.
+    assert.deepEqual(stateEvents, [])
+  })
+
   test('unisolate returns to closed and clears counters', async () => {
     const breaker = circuitBreaker({ consecutiveFailures: 5 })
     await failTimes(breaker, 2)
@@ -340,6 +464,38 @@ describe('events and stats', () => {
     ])
   })
 
+  test('open, close and halfOpen fire alongside stateChange, each with the new snapshot', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const breaker = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1_000, halfOpenCalls: 1 })
+    const seen: string[] = []
+    breaker
+      .on('open', ({ stats, correlationId }) => seen.push(`open:${stats.state}:${correlationId ?? ''}`))
+      .on('halfOpen', ({ stats, correlationId }) => seen.push(`halfOpen:${stats.state}:${correlationId ?? ''}`))
+      .on('close', ({ stats, correlationId }) => seen.push(`close:${stats.state}:${correlationId ?? ''}`))
+
+    await assert.rejects(breaker.execute(boom, { correlationId: 'c1' }))
+    t.mock.timers.tick(1_000)
+    await breaker.execute(() => 'probe', { correlationId: 'c2' })
+
+    // One dedicated event per state, never more than one per transition.
+    assert.deepEqual(seen, ['open:open:c1', 'halfOpen:half-open:c2', 'close:closed:c2'])
+  })
+
+  test('success and failure events report how long the call took', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'] })
+    t.mock.timers.setTime(1_000_000)
+    const breaker = circuitBreaker({ consecutiveFailures: 5 })
+    const durations: number[] = []
+    breaker
+      .on('success', ({ durationMs }) => durations.push(durationMs))
+      .on('failure', ({ durationMs }) => durations.push(durationMs))
+
+    await breaker.execute(() => { t.mock.timers.tick(120); return 'slow' })
+    await assert.rejects(breaker.execute(() => { t.mock.timers.tick(30); throw new Error('down') }))
+
+    assert.deepEqual(durations, [120, 30])
+  })
+
   test('stats exposes counters, lastError and open timing', async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
     t.mock.timers.setTime(1_000_000)
@@ -382,6 +538,97 @@ describe('shared state store', () => {
     // out forever: after the cooldown it probes and recovers the circuit.
     await b.execute(() => 'probe via B')
     assert.equal(await b.execute(() => 'works'), 'works')
+  })
+
+  test('an async store keeps stats() synchronous and coherent', async () => {
+    const breaker = circuitBreaker({ consecutiveFailures: 2, name: 'remote', stateStore: asyncStore() })
+
+    // Nothing has been read from the store yet: the mirror starts empty
+    // rather than exposing a pending promise.
+    assert.equal(breaker.stats().totalCalls, 0)
+
+    await failTimes(breaker, 1)
+    const stats = breaker.stats()
+    assert.equal(stats.state, 'closed')
+    assert.equal(stats.failures, 1)
+    assert.equal(stats.totalCalls, 1)
+
+    await failTimes(breaker, 1)
+    assert.equal(breaker.state, 'open')
+  })
+
+  test('losing the trip race adopts the peer state instead of announcing our own', async () => {
+    const inner = memoryStore({ window: countWindow(10) })
+    let lostTheRace = false
+    // Another instance tripped the shared circuit microseconds earlier.
+    const store: StateStore = {
+      ...inner,
+      getState: () => lostTheRace ? 'open' : 'closed',
+      transition: () => { lostTheRace = true; return false }
+    }
+    const breaker = circuitBreaker({ consecutiveFailures: 1, name: 'shared', stateStore: store })
+    const changes: string[] = []
+    breaker.on('stateChange', ({ to }) => changes.push(to))
+
+    await failTimes(breaker, 1)
+
+    assert.equal(breaker.state, 'open')
+    assert.deepEqual(changes, []) // the transition was the peer's to announce
+    assert.equal(breaker.stats().openedAt, undefined)
+  })
+
+  test('a store that elects another instance to probe rejects without leaking the slot', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const inner = memoryStore({ window: countWindow(10) })
+    let electedElsewhere = true
+    const store: StateStore = { ...inner, acquireProbe: () => !electedElsewhere }
+    const breaker = circuitBreaker({
+      consecutiveFailures: 1,
+      halfOpenAfter: 1_000,
+      halfOpenCalls: 1,
+      name: 'shared',
+      stateStore: store
+    })
+    const rejections: string[] = []
+    breaker.on('reject', ({ reason }) => rejections.push(reason))
+
+    await failTimes(breaker, 1)
+    t.mock.timers.tick(1_000)
+
+    let ran = false
+    await assert.rejects(breaker.execute(() => { ran = true; return 'probe' }), isCircuitOpenError)
+    assert.equal(ran, false)
+    assert.deepEqual(rejections, ['circuit_open'])
+
+    // The refused attempt must not have consumed the single local probe slot.
+    electedElsewhere = false
+    assert.equal(await breaker.execute(() => 'probe'), 'probe')
+    assert.equal(breaker.state, 'closed')
+  })
+
+  test('isolate retries the compare-and-set while peers keep changing the state', async () => {
+    const inner = memoryStore({ window: countWindow(10) })
+    let losses = 2
+    const store: StateStore = {
+      ...inner,
+      transition: (name, from, to) => {
+        if (losses > 0) { losses--; return false }
+        return inner.transition(name, from, to)
+      }
+    }
+    const breaker = circuitBreaker({ name: 'contended', stateStore: store })
+
+    await breaker.isolate()
+
+    assert.equal(losses, 0)
+    assert.equal(breaker.state, 'isolated')
+  })
+
+  test('isolate gives up when the state never settles', async () => {
+    const store: StateStore = { ...memoryStore(), transition: () => false }
+    const breaker = circuitBreaker({ name: 'thrashing', stateStore: store })
+
+    await assert.rejects(breaker.isolate(), /state kept changing/)
   })
 
   test('reset never leaves the isolated state', async () => {

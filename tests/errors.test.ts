@@ -6,6 +6,10 @@ import {
   TimeoutError,
   RetryExhaustedError,
   FallbackFailedError,
+  CircuitOpenError,
+  IsolatedError,
+  BulkheadRejectedError,
+  RateLimitedError,
   isBreakwaterError,
   isTimeoutError,
   isRetryExhaustedError,
@@ -69,6 +73,24 @@ describe('FallbackFailedError', () => {
     assert.equal(error.code, 'FALLBACK_FAILED')
     assert.equal(error.originalError, operationError)
     assert.equal(error.cause, handlerError)
+  })
+})
+
+describe('retryable flag', () => {
+  test('fast rejections say whether retrying them makes sense', () => {
+    const breakerStats = { state: 'open' as const, successes: 0, failures: 3, totalCalls: 3, failureRate: 1 }
+
+    // A deliberate fast rejection: retrying only burns the caller's budget.
+    assert.equal(new CircuitOpenError(breakerStats).retryable, false)
+    assert.equal(new IsolatedError().retryable, false)
+    assert.equal(new IsolatedError().code, 'CIRCUIT_ISOLATED')
+
+    // Saturation is transient: the quota and the slots come back on their own.
+    assert.equal(new BulkheadRejectedError({ active: 1, queued: 0, concurrency: 1, queueLimit: 0 }).retryable, true)
+    assert.equal(
+      new RateLimitedError({ remaining: 0, limit: 1, interval: 1_000, strategy: 'token-bucket' }, 250).retryable,
+      true
+    )
   })
 })
 

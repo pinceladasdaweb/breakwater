@@ -18,10 +18,10 @@ function flaky (failures: number): () => string {
 }
 
 describe('retry()', () => {
-  test('rejects invalid options', () => {
-    assert.throws(() => retry({ attempts: 0 }), RangeError)
-    assert.throws(() => retry({ attempts: 1.5 }), RangeError)
-    assert.throws(() => retry({ deadline: -1 }), RangeError)
+  test('rejects invalid options, naming the offending one', () => {
+    assert.throws(() => retry({ attempts: 0 }), { name: 'RangeError', message: /attempts/ })
+    assert.throws(() => retry({ attempts: 1.5 }), { name: 'RangeError', message: /attempts/ })
+    assert.throws(() => retry({ deadline: -1 }), { name: 'RangeError', message: /deadline/ })
   })
 
   test('returns on first success without waiting', async () => {
@@ -71,10 +71,10 @@ describe('retry()', () => {
     t.mock.timers.enable({ apis: ['setTimeout'] })
     const policy = retry({ attempts: 2, backoff: fixed(10) })
     const retries: Array<{ attempt: number, delay: number }> = []
-    let gaveUp = 0
+    const gaveUp: Array<{ attempts: number, message: string }> = []
     policy
       .on('retry', ({ attempt, delay }) => retries.push({ attempt, delay }))
-      .on('giveUp', () => { gaveUp++ })
+      .on('giveUp', ({ attempts, error }) => gaveUp.push({ attempts, message: (error as Error).message }))
 
     const promise = policy.execute(() => { throw new Error('down') })
     const assertion = assert.rejects(promise, isRetryExhaustedError)
@@ -84,7 +84,7 @@ describe('retry()', () => {
     await assertion
 
     assert.deepEqual(retries, [{ attempt: 1, delay: 10 }])
-    assert.equal(gaveUp, 1)
+    assert.deepEqual(gaveUp, [{ attempts: 2, message: 'down' }])
   })
 
   test('does not retry when retryIf returns false, propagating the original error', async () => {
@@ -141,6 +141,27 @@ describe('retry()', () => {
     assert.equal(calls, 2)
   })
 
+  test('a delay landing exactly on the deadline is still within budget', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    t.mock.timers.setTime(1_700_000_000_000) // a real epoch: the budget is elapsed time, not absolute
+    const policy = retry({ attempts: 3, backoff: fixed(500), deadline: 500 })
+    const gaveUp: Array<{ attempts: number, message: string }> = []
+    policy.on('giveUp', ({ attempts, error }) => gaveUp.push({ attempts, message: (error as Error).message }))
+    let calls = 0
+
+    const promise = policy.execute(() => { calls++; throw new Error('down') })
+    const assertion = assert.rejects(promise, isRetryExhaustedError)
+
+    await drain()
+    t.mock.timers.tick(500) // elapsed 0 + delay 500 === deadline: it does not exceed it
+    await drain()
+    await assertion
+
+    // The second attempt ran; only the third would have overshot.
+    assert.equal(calls, 2)
+    assert.deepEqual(gaveUp, [{ attempts: 2, message: 'down' }])
+  })
+
   test('abort during the delay rejects with the abort reason and stops retrying', async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] })
     const controller = new AbortController()
@@ -156,6 +177,21 @@ describe('retry()', () => {
     await drain()
     controller.abort(new Error('stop everything'))
     await assertion
+    assert.equal(calls, 1)
+  })
+
+  test('a listener that cancels while handling the retry event skips the delay', async () => {
+    const controller = new AbortController()
+    // A long backoff that must never be waited out: the abort lands between
+    // the event and the sleep.
+    const policy = retry({ attempts: 5, backoff: fixed(600_000), signal: controller.signal })
+    policy.on('retry', () => controller.abort(new Error('shedding load')))
+    let calls = 0
+
+    await assert.rejects(
+      policy.execute(() => { calls++; throw new Error('down') }),
+      /shedding load/
+    )
     assert.equal(calls, 1)
   })
 
