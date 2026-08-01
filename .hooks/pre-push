@@ -6,7 +6,7 @@ for branch in "${BYPASS_BRANCHES[@]}"; do
         exit 0
     fi
 done
-ALLOWED_PREFIXES=('feature' 'feat' 'hotfix' 'fix')
+ALLOWED_PREFIXES=('feature' 'feat' 'hotfix' 'fix' 'chore')
 VALID_PREFIX_PATTERN="^($(IFS='|'; echo "${ALLOWED_PREFIXES[*]}"))\/.+$"
 if ! [[ $LOCAL_BRANCH_NAME =~ $VALID_PREFIX_PATTERN ]]; then
     echo -e "\033[31mERROR\033[0m Invalid branch name prefix."
