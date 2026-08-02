@@ -1,0 +1,10 @@
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    # The uid the dashboard JSON is rewritten to at container start — see the
+    # grafana entrypoint in docker-compose.yml.
+    uid: prometheus
+    url: http://prometheus:9090
+    isDefault: true

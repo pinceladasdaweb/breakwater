@@ -117,6 +117,12 @@ A ready-to-import dashboard covering all eight metrics lives at
 circuit states, execution and failure rates, p50/p95 latency, rejections by
 reason and retry/fallback activity, all split by policy `name`.
 
+To see it moving before wiring your own service, the
+[`examples/prometheus-grafana`](../examples/prometheus-grafana) demo is one
+`docker compose up` away: a breakwater-protected app with a scripted outage
+every 90 seconds, Prometheus scraping it, and Grafana provisioned with this
+exact dashboard.
+
 ## Composing with your own collector
 
 `prometheusCollector()` returns a plain `MetricsCollector`, so anything that
