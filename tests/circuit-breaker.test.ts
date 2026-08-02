@@ -6,7 +6,7 @@ import { memoryStore, type StateStore } from '../src/circuit-breaker/state-store
 import { countWindow, timeWindow } from '../src/circuit-breaker/window'
 import { isCircuitOpenError, isIsolatedError } from '../src/errors'
 
-import { drain } from './helpers'
+import { drain, gated, rejectsOnAbort } from './helpers'
 
 const boom = (): never => { throw new Error('downstream failure') }
 
@@ -203,16 +203,16 @@ describe('half-open', () => {
     await failTimes(breaker, 1)
     t.mock.timers.tick(1_000)
 
-    const { promise: gate, resolve: release } = Promise.withResolvers<void>()
+    const g = gated('slow probe')
     const rejections: string[] = []
     breaker.on('reject', ({ reason }) => rejections.push(reason))
 
-    const probe = breaker.execute(async () => { await gate; return 'slow probe' })
+    const probe = breaker.execute(g.fn)
     await drain() // let the probe fully enter the half-open slot
     await assert.rejects(breaker.execute(() => 'extra'), isCircuitOpenError)
     assert.deepEqual(rejections, ['circuit_open'])
 
-    release()
+    g.release()
     assert.equal(await probe, 'slow probe')
   })
 
@@ -239,11 +239,7 @@ describe('half-open', () => {
     t.mock.timers.tick(1_000)
 
     const controller = new AbortController()
-    const cancelled = breaker.execute(async ({ signal }) => {
-      return await new Promise((_resolve, reject) => {
-        signal.addEventListener('abort', () => reject(signal.reason), { once: true })
-      })
-    }, { signal: controller.signal })
+    const cancelled = breaker.execute(rejectsOnAbort(), { signal: controller.signal })
     await drain()
     controller.abort(new Error('caller went away'))
     await assert.rejects(cancelled, /caller went away/)
@@ -301,8 +297,8 @@ describe('half-open', () => {
     t.mock.timers.tick(1_000)
 
     // Period 1: slow probe A starts, probe B fails and reopens the circuit.
-    const { promise: gateA, resolve: releaseA } = Promise.withResolvers<void>()
-    const probeA = breaker.execute(async () => { await gateA; return 'stale success' })
+    const a = gated('stale success')
+    const probeA = breaker.execute(a.fn)
     await drain()
     await assert.rejects(breaker.execute(boom))
     assert.equal(breaker.state, 'open')
@@ -314,7 +310,7 @@ describe('half-open', () => {
 
     // Stale probe A completes now: its success must NOT count towards the
     // current period's majority (2 of 3).
-    releaseA()
+    a.release()
     assert.equal(await probeA, 'stale success')
     assert.equal(breaker.state, 'half-open')
 
@@ -330,8 +326,8 @@ describe('half-open', () => {
     await failTimes(breaker, 1)
     t.mock.timers.tick(1_000)
 
-    const { promise: gateA, reject: rejectA } = Promise.withResolvers<never>()
-    const probeA = breaker.execute(async () => await gateA).catch((e: unknown) => e)
+    const a = gated()
+    const probeA = breaker.execute(a.fn).catch((e: unknown) => e)
     await drain()
     await assert.rejects(breaker.execute(boom)) // reopens (period 1 ends)
 
@@ -339,7 +335,7 @@ describe('half-open', () => {
     await breaker.execute(() => 'fresh probe 1') // period 2, 1 success
     assert.equal(breaker.state, 'half-open')
 
-    rejectA(new Error('stale failure'))
+    a.fail(new Error('stale failure'))
     await probeA
     // The stale failure must not have reopened the circuit.
     assert.equal(breaker.state, 'half-open')

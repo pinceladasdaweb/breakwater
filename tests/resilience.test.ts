@@ -5,7 +5,7 @@ import { resilience } from '../src/compose/resilience'
 import { fixed } from '../src/retry/backoff'
 import { type MetricsCollector } from '../src/metrics/collector'
 import { isBulkheadRejectedError, isRateLimitedError, isRetryExhaustedError, isTimeoutError } from '../src/errors'
-import { drain } from './helpers'
+import { drain, gated, rejectsOnAbort } from './helpers'
 
 describe('resilience()', () => {
   test('with no options it just runs the function', async () => {
@@ -17,11 +17,7 @@ describe('resilience()', () => {
     t.mock.timers.enable({ apis: ['setTimeout'] })
     const policy = resilience({ timeout: 50 })
 
-    const promise = policy.execute(async ({ signal }) => {
-      return await new Promise((_resolve, reject) => {
-        signal.addEventListener('abort', () => reject(signal.reason), { once: true })
-      })
-    })
+    const promise = policy.execute(rejectsOnAbort())
     const assertion = assert.rejects(promise, isTimeoutError)
 
     await drain()
@@ -119,14 +115,14 @@ describe('resilience()', () => {
       metrics: { onReject: (e) => rejections.push(`${e.policy}:${e.reason}:${e.name ?? ''}`) }
     })
 
-    const { promise: gate, resolve: release } = Promise.withResolvers<void>()
-    const slow = policy.execute(async () => { await gate; return 'slow' })
+    const g = gated('slow')
+    const slow = policy.execute(g.fn)
     await drain()
 
     await assert.rejects(policy.execute(() => 'overflow'), isBulkheadRejectedError)
     assert.deepEqual(rejections, ['bulkhead:bulkhead_full:guarded'])
 
-    release()
+    g.release()
     assert.equal(await slow, 'slow')
   })
 
