@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/pinceladasdaweb/breakwater/security/advisories/new
+    about: Privately, so a fix can go out before the details are public. Never as an issue.
+  - name: Documentation
+    url: https://github.com/pinceladasdaweb/breakwater#readme
+    about: A page per policy, with the ordering trade-offs spelled out.

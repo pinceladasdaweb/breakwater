@@ -1,0 +1,74 @@
+name: Bug report
+description: A policy behaves differently from what the documentation says
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Found a security vulnerability instead? Do not file it here — use
+        [private reporting](https://github.com/pinceladasdaweb/breakwater/security/advisories/new).
+
+  - type: textarea
+    id: what-happens
+    attributes:
+      label: What happens
+      description: And what you expected instead.
+      placeholder: |
+        The circuit stays closed after 5 consecutive failures. I expected it to open on the third.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: >
+        The smallest snippet that shows it — the policy configuration and the
+        calls made against it. Use `mock.timers` rather than real waits if
+        timing matters; it makes the report reproducible.
+      render: ts
+    validations:
+      required: true
+
+  - type: textarea
+    id: stats
+    attributes:
+      label: Policy state
+      description: >
+        Optional, but usually decisive for breaker and rate limit reports:
+        the output of `policy.stats()` at the moment things go wrong.
+      render: json
+
+  - type: input
+    id: version
+    attributes:
+      label: breakwater version
+      placeholder: 0.6.0
+    validations:
+      required: true
+
+  - type: input
+    id: runtime
+    attributes:
+      label: Runtime
+      description: Node is the only runtime currently tested — say so if you are on another.
+      placeholder: Node 24.3.0 on Linux
+    validations:
+      required: true
+
+  - type: dropdown
+    id: policies
+    attributes:
+      label: Which policies are involved
+      multiple: true
+      options:
+        - retry
+        - timeout
+        - circuitBreaker
+        - bulkhead
+        - rateLimit
+        - fallback
+        - compose / resilience
+        - named policies (registry)
+        - metrics / events
+        - other

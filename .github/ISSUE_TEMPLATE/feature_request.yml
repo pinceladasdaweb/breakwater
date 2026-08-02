@@ -1,0 +1,44 @@
+name: Feature request
+description: Something breakwater should be able to do and cannot
+labels: ['enhancement']
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What are you trying to protect, and where does breakwater leave you
+        stuck? Describe the situation rather than the API you have in mind —
+        the shape of the solution is easier to get right from the problem.
+      placeholder: |
+        Our consumer needs to stop pulling from the queue entirely while the downstream is down,
+        not just fail fast per message.
+    validations:
+      required: true
+
+  - type: textarea
+    id: today
+    attributes:
+      label: What you do today
+      description: The workaround, if you have one, and why it is not enough.
+
+  - type: textarea
+    id: shape
+    attributes:
+      label: What it might look like
+      description: Optional. A sketch of the API, if you already have one in mind.
+      render: ts
+
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Does it fit the project's constraints?
+      description: >
+        Not a filter — say so if it does not, and it can be discussed. But
+        these shape whether something belongs in the core or behind its own
+        entry point.
+      options:
+        - label: It needs no runtime dependency in the core
+        - label: It relies on web-standard APIs, not Node-specific ones
+        - label: It adds no per-call work to the hot path
+        - label: I would be willing to work on it
