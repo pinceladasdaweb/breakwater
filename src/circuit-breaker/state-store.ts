@@ -11,6 +11,24 @@ export interface WindowCounters {
 }
 
 /**
+ * How long the calls in the window took, successes and failures alike.
+ *
+ * `count` is how many durations the numbers are based on, which is not
+ * always `totalCalls`: a time window keeps a bounded sample per bucket, so
+ * under heavy traffic the percentiles come from a subset. Everything is 0
+ * when nothing has been sampled yet.
+ */
+export interface LatencyStats {
+  count: number
+  min: number
+  max: number
+  mean: number
+  p50: number
+  p95: number
+  p99: number
+}
+
+/**
  * Pluggable backend for the circuit breaker state. The in-memory
  * implementation below is the default; a Redis-backed one shares the state
  * across instances.
@@ -28,6 +46,15 @@ export interface StateStore {
   recordSuccess: (name: string, durationMs: number) => void | Promise<void>
   recordFailure: (name: string, durationMs: number) => void | Promise<void>
   getCounters: (name: string) => WindowCounters | Promise<WindowCounters>
+  /**
+   * Latency distribution over the same window. Optional: a store that does
+   * not track durations simply omits it and `stats()` reports no latency.
+   *
+   * Deliberately separate from `getCounters`, which the breaker calls on
+   * every failure — summarising percentiles is a read for monitoring, not
+   * work the hot path should pay for.
+   */
+  getLatency?: (name: string) => LatencyStats | Promise<LatencyStats>
   /** Clears the window counters (used when the breaker closes or resets). */
   resetCounters: (name: string) => void | Promise<void>
   /**
@@ -53,13 +80,21 @@ export interface MemoryStoreOptions {
  * exact per bucket and the window edge has bucket-size granularity.
  */
 type WindowData =
-  | { kind: 'count', ring: Uint8Array, index: number, filled: number, failures: number }
+  | { kind: 'count', ring: Uint8Array, durations: Float64Array, index: number, filled: number, failures: number }
   | { kind: 'time', bucketMs: number, windowMs: number, buckets: Bucket[] }
 
 interface Bucket {
   start: number
   successes: number
   failures: number
+  durations: Durations
+}
+
+/** A bounded ring of the most recent call durations. */
+interface Durations {
+  ring: Float64Array
+  index: number
+  filled: number
 }
 
 interface Entry {
@@ -68,6 +103,43 @@ interface Entry {
 }
 
 const TIME_BUCKETS = 10
+/**
+ * Durations kept per time bucket. A count window keeps one per call, exactly
+ * matching its size; a time window has no call count to bound it, so it
+ * samples — enough for stable percentiles without growing with traffic.
+ */
+const BUCKET_SAMPLES = 128
+
+const freshDurations = (capacity: number): Durations =>
+  ({ ring: new Float64Array(capacity), index: 0, filled: 0 })
+
+const sample = (durations: Durations, ms: number): void => {
+  durations.ring[durations.index] = ms
+  durations.index = (durations.index + 1) % durations.ring.length
+  if (durations.filled < durations.ring.length) durations.filled++
+}
+
+/** Nearest-rank quantile over an ascending array. */
+const quantile = (sorted: number[], q: number): number =>
+  sorted[Math.max(1, Math.ceil(q * sorted.length)) - 1] as number
+
+const summarise = (values: number[]): LatencyStats => {
+  if (values.length === 0) return { count: 0, min: 0, max: 0, mean: 0, p50: 0, p95: 0, p99: 0 }
+
+  values.sort((a, b) => a - b)
+  let total = 0
+  for (const value of values) total += value
+
+  return {
+    count: values.length,
+    min: values[0] as number,
+    max: values[values.length - 1] as number,
+    mean: total / values.length,
+    p50: quantile(values, 0.5),
+    p95: quantile(values, 0.95),
+    p99: quantile(values, 0.99)
+  }
+}
 
 export function memoryStore (options: MemoryStoreOptions = {}): StateStore {
   const window = options.window ?? timeWindow(30_000)
@@ -75,7 +147,14 @@ export function memoryStore (options: MemoryStoreOptions = {}): StateStore {
 
   const freshWindow = (): WindowData => {
     if (window.kind === 'count') {
-      return { kind: 'count', ring: new Uint8Array(window.size), index: 0, filled: 0, failures: 0 }
+      return {
+        kind: 'count',
+        ring: new Uint8Array(window.size),
+        durations: new Float64Array(window.size),
+        index: 0,
+        filled: 0,
+        failures: 0
+      }
     }
     const bucketMs = Math.max(1, Math.ceil(window.size / TIME_BUCKETS))
     return { kind: 'time', bucketMs, windowMs: window.size, buckets: [] }
@@ -97,7 +176,7 @@ export function memoryStore (options: MemoryStoreOptions = {}): StateStore {
     }
   }
 
-  const record = (name: string, ok: boolean): void => {
+  const record = (name: string, ok: boolean, durationMs: number): void => {
     const data = entry(name).window
 
     if (data.kind === 'count') {
@@ -108,6 +187,8 @@ export function memoryStore (options: MemoryStoreOptions = {}): StateStore {
         data.filled++
       }
       data.ring[data.index] = ok ? 1 : 0
+      // The duration shares the outcome's slot, so it ages out with it.
+      data.durations[data.index] = durationMs
       if (!ok) data.failures++
       data.index = (data.index + 1) % data.ring.length
       return
@@ -117,12 +198,13 @@ export function memoryStore (options: MemoryStoreOptions = {}): StateStore {
     const start = now - (now % data.bucketMs)
     let current = data.buckets[data.buckets.length - 1]
     if (current === undefined || current.start !== start) {
-      current = { start, successes: 0, failures: 0 }
+      current = { start, successes: 0, failures: 0, durations: freshDurations(BUCKET_SAMPLES) }
       data.buckets.push(current)
       expireBuckets(data, now)
     }
     if (ok) current.successes++
     else current.failures++
+    sample(current.durations, durationMs)
   }
 
   return {
@@ -135,8 +217,25 @@ export function memoryStore (options: MemoryStoreOptions = {}): StateStore {
       return true
     },
 
-    recordSuccess: (name) => record(name, true),
-    recordFailure: (name) => record(name, false),
+    recordSuccess: (name, durationMs) => record(name, true, durationMs),
+    recordFailure: (name, durationMs) => record(name, false, durationMs),
+
+    getLatency (name) {
+      const data = entry(name).window
+      const values: number[] = []
+
+      if (data.kind === 'count') {
+        for (let i = 0; i < data.filled; i++) values.push(data.durations[i] as number)
+      } else {
+        expireBuckets(data, Date.now())
+        for (const bucket of data.buckets) {
+          const { ring, filled } = bucket.durations
+          for (let i = 0; i < filled; i++) values.push(ring[i] as number)
+        }
+      }
+
+      return summarise(values)
+    },
 
     getCounters (name) {
       const data = entry(name).window

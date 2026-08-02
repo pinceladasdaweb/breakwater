@@ -2,7 +2,7 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { circuitBreaker } from '../src/circuit-breaker/circuit-breaker'
-import { memoryStore, type StateStore } from '../src/circuit-breaker/state-store'
+import { memoryStore, type LatencyStats, type StateStore } from '../src/circuit-breaker/state-store'
 import { countWindow, timeWindow } from '../src/circuit-breaker/window'
 import { isCircuitOpenError, isIsolatedError } from '../src/errors'
 
@@ -490,6 +490,66 @@ describe('events and stats', () => {
     await assert.rejects(breaker.execute(() => { t.mock.timers.tick(30); throw new Error('down') }))
 
     assert.deepEqual(durations, [120, 30])
+  })
+
+  test('stats reports how long the calls in the window took', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'] })
+    t.mock.timers.setTime(1_000_000)
+    const breaker = circuitBreaker({ consecutiveFailures: 10, window: countWindow(4) })
+
+    for (const ms of [10, 20, 30]) {
+      await breaker.execute(() => { t.mock.timers.tick(ms) })
+    }
+    await assert.rejects(breaker.execute(() => { t.mock.timers.tick(40); return boom() }))
+
+    // Failures count too: a slow failure is still a slow call.
+    assert.deepEqual(breaker.stats().latency, {
+      count: 4, min: 10, max: 40, mean: 25, p50: 20, p95: 40, p99: 40
+    })
+  })
+
+  test('a fresh breaker reports an empty latency, not a missing one', () => {
+    const breaker = circuitBreaker({ window: countWindow(4) })
+
+    assert.deepEqual(breaker.stats().latency, {
+      count: 0, min: 0, max: 0, mean: 0, p50: 0, p95: 0, p99: 0
+    })
+  })
+
+  test('a store without latency tracking simply reports none', async () => {
+    const inner = memoryStore({ window: countWindow(4) })
+    const { getLatency, ...withoutLatency } = inner
+    const breaker = circuitBreaker({ name: 'basic', stateStore: withoutLatency })
+
+    await breaker.execute(() => 'ok')
+
+    assert.equal(breaker.stats().latency, undefined)
+  })
+
+  test('the rejection snapshot skips latency — no percentiles on the reject path', async () => {
+    const store = memoryStore({ window: countWindow(4) })
+    let latencyReads = 0
+    const counted = {
+      ...store,
+      getLatency: (name: string) => { latencyReads++; return store.getLatency?.(name) as LatencyStats }
+    }
+    const breaker = circuitBreaker({ consecutiveFailures: 1, name: 'counted', stateStore: counted })
+
+    await assert.rejects(breaker.execute(boom))
+    const before = latencyReads
+
+    for (let i = 0; i < 5; i++) {
+      await assert.rejects(breaker.execute(() => 'x'), (error: unknown) => {
+        assert.ok(isCircuitOpenError(error))
+        assert.equal(error.stats.latency, undefined)
+        return true
+      })
+    }
+
+    // Five fast rejections summarised nothing; only stats() pays for it.
+    assert.equal(latencyReads, before)
+    assert.ok((breaker.stats().latency?.count ?? 0) > 0)
+    assert.equal(latencyReads, before + 1)
   })
 
   test('stats exposes counters, lastError and open timing', async (t) => {

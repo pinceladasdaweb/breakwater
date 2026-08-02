@@ -5,7 +5,7 @@ import { basePolicy, type Policy } from '../policy'
 import { CircuitOpenError, IsolatedError } from '../errors'
 import { assertPositiveFinite, assertPositiveInt } from '../validate'
 import { createEmitter, withObservable, type Observable } from '../events'
-import { memoryStore, type BreakerState, type StateStore, type WindowCounters } from './state-store'
+import { memoryStore, type BreakerState, type LatencyStats, type StateStore, type WindowCounters } from './state-store'
 
 export interface CircuitBreakerStats {
   state: BreakerState
@@ -13,6 +13,13 @@ export interface CircuitBreakerStats {
   failures: number
   totalCalls: number
   failureRate: number
+  /**
+   * How long the calls in the window took. Absent when the state store does
+   * not track durations, and on the snapshot carried by CircuitOpenError —
+   * a rejected call has no latency of its own, and summarising percentiles
+   * on every fast rejection would put real work on the rejection path.
+   */
+  latency?: LatencyStats
   lastError?: unknown
   /** Epoch ms of the moment the circuit last opened. */
   openedAt?: number
@@ -110,6 +117,7 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
   // (distributed) store, which keeps stats() and .state synchronous.
   let localState: BreakerState = 'closed'
   let lastCounters: WindowCounters = EMPTY_COUNTERS
+  let lastLatency: LatencyStats | undefined
   let lastError: unknown
   let openedAt: number | undefined
   let consecutive = 0
@@ -130,9 +138,19 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
     if (!(counters instanceof Promise)) lastCounters = counters
   }
 
-  const stats = (): CircuitBreakerStats => {
+  /** Counters only — cheap enough for the rejection path. */
+  const snapshot = (): CircuitBreakerStats => {
     syncCounters()
     return { state: localState, ...lastCounters, lastError, openedAt, nextAttemptAt: nextAttemptAt() }
+  }
+
+  const stats = (): CircuitBreakerStats => {
+    const current = snapshot()
+    const latency = store.getLatency?.(name)
+    // Same rule as the counters: an async store keeps the last known value
+    // rather than leaking a pending promise into the snapshot.
+    if (latency !== undefined && !(latency instanceof Promise)) lastLatency = latency
+    return lastLatency === undefined ? current : { ...current, latency: lastLatency }
   }
 
   const changeState = (from: BreakerState, to: BreakerState, correlationId?: string): void => {
@@ -156,7 +174,7 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
 
   const rejectFast = (reason: 'circuit_open' | 'isolated', correlationId: string): never => {
     emitter.emit('reject', { reason, correlationId })
-    throw reason === 'isolated' ? new IsolatedError() : new CircuitOpenError(stats())
+    throw reason === 'isolated' ? new IsolatedError() : new CircuitOpenError(snapshot())
   }
 
   const onSuccess = async (isCurrentProbe: boolean, durationMs: number, correlationId: string): Promise<void> => {

@@ -68,6 +68,7 @@ breaker.stats()
 // {
 //   state: 'open',
 //   successes: 3, failures: 17, totalCalls: 20, failureRate: 0.85,
+//   latency: { count: 20, min: 12, max: 3004, mean: 891, p50: 210, p95: 3001, p99: 3004 },
 //   lastError: FetchError('ECONNREFUSED'),
 //   openedAt: 1783206000000,
 //   nextAttemptAt: 1783206030000

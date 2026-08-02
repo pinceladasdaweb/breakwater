@@ -233,7 +233,8 @@ breaker
   .on('reject', ({ correlationId }) => log.debug({ correlationId }, 'request rejected fast'))
 
 breaker.stats()
-// { state, successes, failures, totalCalls, failureRate, lastError, openedAt, nextAttemptAt }
+// { state, successes, failures, totalCalls, failureRate, latency, lastError, openedAt, nextAttemptAt }
+// latency: { count, min, max, mean, p50, p95, p99 } over the same window
 ```
 
 For metrics pipelines, implement the `MetricsCollector` interface once and plug it
