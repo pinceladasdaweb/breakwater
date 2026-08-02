@@ -48,7 +48,7 @@ const charge = await payments.execute(({ signal }) => api.post('/charge', body, 
 | Policy composition with explicit ordering | ✅ first-class | ❌ | ✅ |
 | Named policy registry (central config) | ✅ | ❌ | ❌ |
 | Typed events + pluggable metrics collector | ✅ native | ➖ via plugin | ❌ |
-| Prometheus / OpenTelemetry adapters | 🔜 planned | ➖ via plugin | ❌ |
+| Prometheus / OpenTelemetry adapters | ✅ [`breakwater/prometheus`](docs/prometheus.md) · OTel planned | ➖ via plugin | ❌ |
 | Distributed circuit breaker state (Redis) | 🔜 planned | ❌ | ❌ |
 | TypeScript | ✅ native | ➖ via `@types` | ✅ native |
 | Runtime dependencies | **0** | 0 | 0 |
