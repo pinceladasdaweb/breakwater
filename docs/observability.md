@@ -118,9 +118,11 @@ const policy = resilience({
 })
 ```
 
-Ready-made `breakwater/prometheus` and `/otel` entry points
-implementing this interface are planned — the core will never import
-`prom-client` or OpenTelemetry itself.
+Don't want to write one? [`breakwater/prometheus`](prometheus.md) is a
+ready-made implementation backed by prom-client. An OpenTelemetry entry point
+is planned. Either way the core never imports `prom-client` or OpenTelemetry
+itself — the adapters live behind their own entry points, with their client
+libraries as optional peer dependencies.
 
 ## Manual pipelines: `attachMetrics()` and `metricsPolicy()`
 
