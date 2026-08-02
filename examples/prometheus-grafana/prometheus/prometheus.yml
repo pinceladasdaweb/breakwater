@@ -1,0 +1,8 @@
+# Scrape often: the demo's whole outage cycle is 90 seconds.
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: breakwater-demo
+    static_configs:
+      - targets: ['app:8080']

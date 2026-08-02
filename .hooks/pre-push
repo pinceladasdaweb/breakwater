@@ -6,7 +6,14 @@ for branch in "${BYPASS_BRANCHES[@]}"; do
         exit 0
     fi
 done
-ALLOWED_PREFIXES=('feature' 'feat' 'hotfix' 'fix')
+# Every commitlint type (@commitlint/config-conventional type-enum), so a
+# branch can be named after the change it carries, plus the two gitflow names
+# that predate it. Keep in step with .commitlintrc.json.
+ALLOWED_PREFIXES=(
+    'build' 'chore' 'ci' 'docs' 'feat' 'fix'
+    'perf' 'refactor' 'revert' 'style' 'test'
+    'feature' 'hotfix'
+)
 VALID_PREFIX_PATTERN="^($(IFS='|'; echo "${ALLOWED_PREFIXES[*]}"))\/.+$"
 if ! [[ $LOCAL_BRANCH_NAME =~ $VALID_PREFIX_PATTERN ]]; then
     echo -e "\033[31mERROR\033[0m Invalid branch name prefix."

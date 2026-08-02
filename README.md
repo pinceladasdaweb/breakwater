@@ -48,7 +48,7 @@ const charge = await payments.execute(({ signal }) => api.post('/charge', body, 
 | Policy composition with explicit ordering | ✅ first-class | ❌ | ✅ |
 | Named policy registry (central config) | ✅ | ❌ | ❌ |
 | Typed events + pluggable metrics collector | ✅ native | ➖ via plugin | ❌ |
-| Prometheus / OpenTelemetry adapters | 🔜 planned | ➖ via plugin | ❌ |
+| Prometheus / OpenTelemetry adapters | ✅ [`breakwater/prometheus`](docs/prometheus.md) · OTel planned | ➖ via plugin | ❌ |
 | Distributed circuit breaker state (Redis) | 🔜 planned | ❌ | ❌ |
 | TypeScript | ✅ native | ➖ via `@types` | ✅ native |
 | Runtime dependencies | **0** | 0 | 0 |
@@ -233,7 +233,8 @@ breaker
   .on('reject', ({ correlationId }) => log.debug({ correlationId }, 'request rejected fast'))
 
 breaker.stats()
-// { state, successes, failures, totalCalls, failureRate, lastError, openedAt, nextAttemptAt }
+// { state, successes, failures, totalCalls, failureRate, latency, lastError, openedAt, nextAttemptAt }
+// latency: { count, min, max, mean, p50, p95, p99 } over the same window
 ```
 
 For metrics pipelines, implement the `MetricsCollector` interface once and plug it
@@ -253,8 +254,18 @@ a whole composition in one call, and `metricsPolicy(collector)` measures the
 pipeline as a regular outermost policy. Compositions also expose an
 aggregated `stats()` of their inner policies.
 
-Prometheus and OpenTelemetry adapters implementing this interface are planned as
-optional entry points. See [docs/observability.md](docs/observability.md).
+Don't want to write a collector? **`breakwater/prometheus`** ships ready-made
+prom-client metrics — executions, durations, rejections and circuit states —
+plus a Grafana dashboard to import:
+
+```ts
+import { prometheusCollector } from 'breakwater/prometheus' // prom-client is a peer dependency
+
+const policy = resilience({ name: 'payments-api', metrics: prometheusCollector() })
+```
+
+See [docs/prometheus.md](docs/prometheus.md). An OpenTelemetry adapter is
+planned as another optional entry point.
 
 ## Errors
 
@@ -296,6 +307,7 @@ See [docs/errors.md](docs/errors.md).
 - [Composition & ordering](docs/composition.md) — read this one; ordering is where resilience goes right or wrong
 - [Named policies](docs/named-policies.md)
 - [Observability: events, stats & metrics](docs/observability.md)
+- [Prometheus adapter](docs/prometheus.md) — ready-made prom-client collectors + a Grafana dashboard
 - [Errors](docs/errors.md)
 
 ## Requirements

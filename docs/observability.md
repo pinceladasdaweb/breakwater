@@ -68,6 +68,7 @@ breaker.stats()
 // {
 //   state: 'open',
 //   successes: 3, failures: 17, totalCalls: 20, failureRate: 0.85,
+//   latency: { count: 20, min: 12, max: 3004, mean: 891, p50: 210, p95: 3001, p99: 3004 },
 //   lastError: FetchError('ECONNREFUSED'),
 //   openedAt: 1783206000000,
 //   nextAttemptAt: 1783206030000
@@ -117,9 +118,11 @@ const policy = resilience({
 })
 ```
 
-Ready-made `breakwater/prometheus` and `/otel` entry points
-implementing this interface are planned — the core will never import
-`prom-client` or OpenTelemetry itself.
+Don't want to write one? [`breakwater/prometheus`](prometheus.md) is a
+ready-made implementation backed by prom-client. An OpenTelemetry entry point
+is planned. Either way the core never imports `prom-client` or OpenTelemetry
+itself — the adapters live behind their own entry points, with their client
+libraries as optional peer dependencies.
 
 ## Manual pipelines: `attachMetrics()` and `metricsPolicy()`
 

@@ -12,7 +12,7 @@ import { circuitBreaker } from '../src/circuit-breaker/circuit-breaker'
 import { bulkhead } from '../src/bulkhead/bulkhead'
 import { rateLimit } from '../src/rate-limit/rate-limit'
 import { fallback } from '../src/fallback/fallback'
-import { drain } from './helpers'
+import { drain, gated, rejectsOnAbort } from './helpers'
 
 function recordingCollector (events: string[]): MetricsCollector {
   return {
@@ -72,11 +72,11 @@ describe('attachMetrics()', () => {
     await rl.execute(() => 'a')
     await assert.rejects(rl.execute(() => 'b'))
 
-    const { promise: gate, resolve: release } = Promise.withResolvers<void>()
-    const slow = bh.execute(async () => { await gate })
+    const g = gated()
+    const slow = bh.execute(g.fn)
     await drain()
     await assert.rejects(bh.execute(() => 'x'))
-    release()
+    g.release()
     await slow
 
     assert.deepEqual(events, ['reject:rateLimit:rate_limited', 'reject:bulkhead:bulkhead_full'])
@@ -102,11 +102,7 @@ describe('attachMetrics()', () => {
     const policy = timeout(50)
     attachMetrics(policy, recordingCollector(events))
 
-    const promise = policy.execute(async ({ signal }) => {
-      return await new Promise((_resolve, reject) => {
-        signal.addEventListener('abort', () => reject(signal.reason), { once: true })
-      })
-    })
+    const promise = policy.execute(rejectsOnAbort())
     const assertion = assert.rejects(promise)
     await drain()
     t.mock.timers.tick(50)
@@ -157,11 +153,7 @@ describe('attachMetrics()', () => {
     const policy = timeout(50)
     attachMetrics(policy, {})
 
-    const promise = policy.execute(async ({ signal }) => {
-      return await new Promise((_resolve, reject) => {
-        signal.addEventListener('abort', () => reject(signal.reason), { once: true })
-      })
-    })
+    const promise = policy.execute(rejectsOnAbort())
     const assertion = assert.rejects(promise)
     await drain()
     t.mock.timers.tick(50)

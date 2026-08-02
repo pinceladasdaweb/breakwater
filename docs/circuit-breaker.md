@@ -124,13 +124,33 @@ breaker.stats()            // snapshot, see below
 {
   state: 'open',
   successes: 3, failures: 17, totalCalls: 20, failureRate: 0.85,
+  latency: {                   // over the same window, successes and failures alike
+    count: 20,                 // how many durations the numbers are based on
+    min: 12, max: 3004, mean: 891,
+    p50: 210, p95: 3001, p99: 3004
+  },
   lastError: FetchError('ECONNREFUSED ...'),
   openedAt: 1783206000000,     // epoch ms
   nextAttemptAt: 1783206030000 // when probing becomes allowed
 }
 ```
 
-`CircuitOpenError` carries the same snapshot in `error.stats` — perfect for a
+The latency tells you *which* failure you are looking at: a p95 that jumped to
+the timeout while the rate climbed is a dependency slowing down, whereas fast
+failures at a healthy p95 are something rejecting you outright.
+
+Two things to know about it. A count window keeps one duration per call, so
+`count` matches `totalCalls` exactly; a time window has no call count to bound
+it and samples up to 128 durations per bucket, so under heavy traffic the
+percentiles come from a subset and `count` says how large it was. And
+`latency` is absent from the snapshot inside `CircuitOpenError` — a rejected
+call has no latency of its own, and summarising percentiles on every fast
+rejection would put real work on the rejection path.
+
+Custom stores opt in by implementing the optional `getLatency` method; one
+that does not simply reports no latency.
+
+`CircuitOpenError` carries the counters in `error.stats` — perfect for a
 `Retry-After` header:
 
 ```ts
@@ -173,6 +193,9 @@ const b = circuitBreaker({ name: 'payments', stateStore: store })
 With a custom store, the store owns the counter aggregation (the breaker's
 `window` option is ignored) and a stable `name` is required. Every `StateStore`
 method may be sync or async; `transition` must be an atomic compare-and-set.
+
+`getLatency` is the one optional method: implement it to have durations show
+up in `stats()`, or leave it out and everything else keeps working.
 
 ## Real-world example: HTTP client with per-host breakers
 

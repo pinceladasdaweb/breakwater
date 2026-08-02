@@ -3,23 +3,7 @@ import assert from 'node:assert/strict'
 
 import { bulkhead } from '../src/bulkhead/bulkhead'
 import { isBulkheadRejectedError } from '../src/errors'
-import { drain } from './helpers'
-
-/** A controllable execution: stays in flight until released. */
-function gated (): { fn: () => Promise<string>, release: () => void, running: () => number } {
-  let running = 0
-  const { promise: gate, resolve: release } = Promise.withResolvers<void>()
-  return {
-    fn: async () => {
-      running++
-      await gate
-      running--
-      return 'done'
-    },
-    release: () => release(),
-    running: () => running
-  }
-}
+import { drain, gated } from './helpers'
 
 describe('bulkhead() options', () => {
   test('rejects invalid options, naming the offending one', () => {
@@ -103,9 +87,9 @@ describe('queue', () => {
   test('admits waiters in FIFO order', async () => {
     const policy = bulkhead({ concurrency: 1, queue: 3 })
     const order: string[] = []
-    const { promise: gate, resolve: release } = Promise.withResolvers<void>()
+    const g = gated()
 
-    const blocker = policy.execute(async () => { await gate })
+    const blocker = policy.execute(g.fn)
     await drain()
 
     const waiters = ['a', 'b', 'c'].map(async (id) =>
@@ -114,7 +98,7 @@ describe('queue', () => {
     await drain()
     assert.equal(policy.stats().queued, 3)
 
-    release()
+    g.release()
     await blocker
     await Promise.all(waiters)
     assert.deepEqual(order, ['a', 'b', 'c'])
@@ -122,13 +106,13 @@ describe('queue', () => {
 
   test('a failing execution still hands its slot to the next waiter', async () => {
     const policy = bulkhead({ concurrency: 1, queue: 2 })
-    const { promise: gate, reject: fail } = Promise.withResolvers<never>()
+    const g = gated()
 
-    const failing = policy.execute(async () => await gate).catch((e: unknown) => (e as Error).message)
+    const failing = policy.execute(g.fn).catch((e: unknown) => (e as Error).message)
     await drain()
     const queued = policy.execute(() => 'queued ran')
 
-    fail(new Error('exploded'))
+    g.fail(new Error('exploded'))
     assert.equal(await failing, 'exploded')
     assert.equal(await queued, 'queued ran')
     assert.equal(policy.stats().active, 0)

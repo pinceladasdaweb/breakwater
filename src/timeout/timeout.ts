@@ -35,9 +35,14 @@ async function rejectOnAbort (signal: AbortSignal): Promise<never> {
   })
 }
 
-/** True when the rejection is the abort surfacing through the function. */
-const isAbortSurface = (error: unknown, signal: AbortSignal): boolean =>
-  error === signal.reason || (error instanceof Error && error.name === 'AbortError')
+/**
+ * True when the rejection is our abort surfacing through the function under
+ * a different identity. The name check is sufficient: a function rethrowing
+ * the reason itself rethrows the TimeoutError, which the caller recognises
+ * by identity before ever asking here.
+ */
+const isAbortSurface = (error: unknown): boolean =>
+  error instanceof Error && error.name === 'AbortError'
 
 export function timeout (ms: number, options: TimeoutOptions = {}): TimeoutPolicy {
   assertPositiveFinite('timeout ms', ms)
@@ -55,9 +60,6 @@ export function timeout (ms: number, options: TimeoutOptions = {}): TimeoutPolic
     // exit mid-call with the promise forever unsettled. clearTimeout in the
     // finally already guarantees nothing outlives the call.
     const timer = setTimeout(() => {
-      // External cancellation already won — this call is cancelled, not
-      // timed out. Never report a timeout for it.
-      if (ctx.signal.aborted) return
       timeoutError = new TimeoutError(ms, mode)
       controller.abort(timeoutError)
     }, ms)
@@ -82,6 +84,9 @@ export function timeout (ms: number, options: TimeoutOptions = {}): TimeoutPolic
       return await promise
     } catch (error) {
       // Cancellation is not a timeout: propagate the caller's reason as-is.
+      // This single guard owns the invariant — even when the deadline fired
+      // first, a caller that cancelled before the call settled hears nothing
+      // about a timeout.
       if (ctx.signal.aborted) throw error
 
       if (timeoutError !== undefined) {
@@ -91,7 +96,7 @@ export function timeout (ms: number, options: TimeoutOptions = {}): TimeoutPolic
         }
         // The function may surface our abort as its own error type (e.g.
         // fetch's AbortError): normalize it, keeping the original as cause.
-        if (isAbortSurface(error, signal)) {
+        if (isAbortSurface(error)) {
           emitter.emit('timeout', { ms, mode, correlationId: ctx.correlationId })
           throw new TimeoutError(ms, mode, { cause: error })
         }

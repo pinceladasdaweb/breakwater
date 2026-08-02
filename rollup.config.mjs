@@ -5,20 +5,34 @@ import { dts } from 'rollup-plugin-dts'
 // the library's own source (deps, node builtins) stays external.
 const external = (id) => !id.startsWith('.') && !id.startsWith('/')
 
-export default [
+// One pair of configs per public entry point. Each subpath bundles its own
+// tree — entry points stay independent, so importing breakwater/prometheus
+// never loads the core and vice versa.
+const entry = (input, name) => [
   {
-    input: 'src/index.ts',
+    input,
     output: [
-      { file: 'dist/index.cjs', format: 'cjs', exports: 'named' },
-      { file: 'dist/index.mjs', format: 'es', exports: 'named' }
+      { file: `dist/${name}.cjs`, format: 'cjs', exports: 'named' },
+      { file: `dist/${name}.mjs`, format: 'es', exports: 'named' }
     ],
     plugins: [typescript({ include: ['src/**/*.ts'] })],
     external
   },
   {
-    input: 'src/index.ts',
-    output: { file: 'dist/index.d.ts', format: 'es' },
+    input,
+    // The .d.cts is a byte-identical copy: the declarations contain nothing
+    // module-kind-sensitive, and emitting both here keeps the build script a
+    // plain `rollup -c` however many entry points exist.
+    output: [
+      { file: `dist/${name}.d.ts`, format: 'es' },
+      { file: `dist/${name}.d.cts`, format: 'es' }
+    ],
     plugins: [dts()],
     external
   }
+]
+
+export default [
+  ...entry('src/index.ts', 'index'),
+  ...entry('src/prometheus/index.ts', 'prometheus')
 ]

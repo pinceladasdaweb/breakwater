@@ -16,6 +16,23 @@
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
       }
+    },
+    "./prometheus": {
+      "import": {
+        "types": "./dist/prometheus.d.ts",
+        "default": "./dist/prometheus.mjs"
+      },
+      "require": {
+        "types": "./dist/prometheus.d.cts",
+        "default": "./dist/prometheus.cjs"
+      }
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "prometheus": [
+        "dist/prometheus.d.ts"
+      ]
     }
   },
   "files": [
@@ -25,7 +42,7 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "rollup -c rollup.config.mjs && cp dist/index.d.ts dist/index.d.cts",
+    "build": "rollup -c rollup.config.mjs",
     "hooks": "git config core.hooksPath .hooks",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
@@ -33,7 +50,8 @@
     "test": "node --import tsx --test --test-timeout=10000 'tests/**/*.test.ts'",
     "test:coverage": "node --import tsx --experimental-test-coverage --test --test-timeout=10000 'tests/**/*.test.ts'",
     "test:mutation": "stryker run",
-    "check:types": "tsc --noEmit"
+    "check:types": "tsc --noEmit",
+    "check:types:next": "node node_modules/typescript7/bin/tsc --noEmit"
   },
   "keywords": [
     "resilience",
@@ -45,7 +63,9 @@
     "policy",
     "fault-tolerance",
     "resilience4j",
-    "observability"
+    "observability",
+    "prometheus",
+    "metrics"
   ],
   "author": "Pedro Rogério",
   "license": "MIT",
@@ -73,15 +93,25 @@
     "eslint": "^9.39.5",
     "lint-staged": "^17.2.0",
     "neostandard": "^0.13.0",
+    "prom-client": "^15.1.3",
     "rollup": "^4.62.2",
     "rollup-plugin-dts": "^6.4.1",
     "tslib": "^2.8.1",
     "tsx": "^4.23.1",
-    "typescript": "~5.9.3"
+    "typescript": "^6.0.3",
+    "typescript7": "npm:typescript@^7.0.2"
   },
   "lint-staged": {
     "src/**/*.ts": "eslint",
     "tests/**/*.ts": "eslint"
   },
-  "sideEffects": false
+  "sideEffects": false,
+  "peerDependencies": {
+    "prom-client": "^15.0.0"
+  },
+  "peerDependenciesMeta": {
+    "prom-client": {
+      "optional": true
+    }
+  }
 }

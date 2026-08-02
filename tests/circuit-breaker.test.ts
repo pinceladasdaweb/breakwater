@@ -2,11 +2,11 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { circuitBreaker } from '../src/circuit-breaker/circuit-breaker'
-import { memoryStore, type StateStore } from '../src/circuit-breaker/state-store'
+import { memoryStore, type LatencyStats, type StateStore } from '../src/circuit-breaker/state-store'
 import { countWindow, timeWindow } from '../src/circuit-breaker/window'
 import { isCircuitOpenError, isIsolatedError } from '../src/errors'
 
-import { drain } from './helpers'
+import { drain, gated, rejectsOnAbort } from './helpers'
 
 const boom = (): never => { throw new Error('downstream failure') }
 
@@ -203,16 +203,16 @@ describe('half-open', () => {
     await failTimes(breaker, 1)
     t.mock.timers.tick(1_000)
 
-    const { promise: gate, resolve: release } = Promise.withResolvers<void>()
+    const g = gated('slow probe')
     const rejections: string[] = []
     breaker.on('reject', ({ reason }) => rejections.push(reason))
 
-    const probe = breaker.execute(async () => { await gate; return 'slow probe' })
+    const probe = breaker.execute(g.fn)
     await drain() // let the probe fully enter the half-open slot
     await assert.rejects(breaker.execute(() => 'extra'), isCircuitOpenError)
     assert.deepEqual(rejections, ['circuit_open'])
 
-    release()
+    g.release()
     assert.equal(await probe, 'slow probe')
   })
 
@@ -239,11 +239,7 @@ describe('half-open', () => {
     t.mock.timers.tick(1_000)
 
     const controller = new AbortController()
-    const cancelled = breaker.execute(async ({ signal }) => {
-      return await new Promise((_resolve, reject) => {
-        signal.addEventListener('abort', () => reject(signal.reason), { once: true })
-      })
-    }, { signal: controller.signal })
+    const cancelled = breaker.execute(rejectsOnAbort(), { signal: controller.signal })
     await drain()
     controller.abort(new Error('caller went away'))
     await assert.rejects(cancelled, /caller went away/)
@@ -301,8 +297,8 @@ describe('half-open', () => {
     t.mock.timers.tick(1_000)
 
     // Period 1: slow probe A starts, probe B fails and reopens the circuit.
-    const { promise: gateA, resolve: releaseA } = Promise.withResolvers<void>()
-    const probeA = breaker.execute(async () => { await gateA; return 'stale success' })
+    const a = gated('stale success')
+    const probeA = breaker.execute(a.fn)
     await drain()
     await assert.rejects(breaker.execute(boom))
     assert.equal(breaker.state, 'open')
@@ -314,7 +310,7 @@ describe('half-open', () => {
 
     // Stale probe A completes now: its success must NOT count towards the
     // current period's majority (2 of 3).
-    releaseA()
+    a.release()
     assert.equal(await probeA, 'stale success')
     assert.equal(breaker.state, 'half-open')
 
@@ -330,8 +326,8 @@ describe('half-open', () => {
     await failTimes(breaker, 1)
     t.mock.timers.tick(1_000)
 
-    const { promise: gateA, reject: rejectA } = Promise.withResolvers<never>()
-    const probeA = breaker.execute(async () => await gateA).catch((e: unknown) => e)
+    const a = gated()
+    const probeA = breaker.execute(a.fn).catch((e: unknown) => e)
     await drain()
     await assert.rejects(breaker.execute(boom)) // reopens (period 1 ends)
 
@@ -339,7 +335,7 @@ describe('half-open', () => {
     await breaker.execute(() => 'fresh probe 1') // period 2, 1 success
     assert.equal(breaker.state, 'half-open')
 
-    rejectA(new Error('stale failure'))
+    a.fail(new Error('stale failure'))
     await probeA
     // The stale failure must not have reopened the circuit.
     assert.equal(breaker.state, 'half-open')
@@ -494,6 +490,66 @@ describe('events and stats', () => {
     await assert.rejects(breaker.execute(() => { t.mock.timers.tick(30); throw new Error('down') }))
 
     assert.deepEqual(durations, [120, 30])
+  })
+
+  test('stats reports how long the calls in the window took', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'] })
+    t.mock.timers.setTime(1_000_000)
+    const breaker = circuitBreaker({ consecutiveFailures: 10, window: countWindow(4) })
+
+    for (const ms of [10, 20, 30]) {
+      await breaker.execute(() => { t.mock.timers.tick(ms) })
+    }
+    await assert.rejects(breaker.execute(() => { t.mock.timers.tick(40); return boom() }))
+
+    // Failures count too: a slow failure is still a slow call.
+    assert.deepEqual(breaker.stats().latency, {
+      count: 4, min: 10, max: 40, mean: 25, p50: 20, p95: 40, p99: 40
+    })
+  })
+
+  test('a fresh breaker reports an empty latency, not a missing one', () => {
+    const breaker = circuitBreaker({ window: countWindow(4) })
+
+    assert.deepEqual(breaker.stats().latency, {
+      count: 0, min: 0, max: 0, mean: 0, p50: 0, p95: 0, p99: 0
+    })
+  })
+
+  test('a store without latency tracking simply reports none', async () => {
+    const inner = memoryStore({ window: countWindow(4) })
+    const { getLatency, ...withoutLatency } = inner
+    const breaker = circuitBreaker({ name: 'basic', stateStore: withoutLatency })
+
+    await breaker.execute(() => 'ok')
+
+    assert.equal(breaker.stats().latency, undefined)
+  })
+
+  test('the rejection snapshot skips latency — no percentiles on the reject path', async () => {
+    const store = memoryStore({ window: countWindow(4) })
+    let latencyReads = 0
+    const counted = {
+      ...store,
+      getLatency: (name: string) => { latencyReads++; return store.getLatency?.(name) as LatencyStats }
+    }
+    const breaker = circuitBreaker({ consecutiveFailures: 1, name: 'counted', stateStore: counted })
+
+    await assert.rejects(breaker.execute(boom))
+    const before = latencyReads
+
+    for (let i = 0; i < 5; i++) {
+      await assert.rejects(breaker.execute(() => 'x'), (error: unknown) => {
+        assert.ok(isCircuitOpenError(error))
+        assert.equal(error.stats.latency, undefined)
+        return true
+      })
+    }
+
+    // Five fast rejections summarised nothing; only stats() pays for it.
+    assert.equal(latencyReads, before)
+    assert.ok((breaker.stats().latency?.count ?? 0) > 0)
+    assert.equal(latencyReads, before + 1)
   })
 
   test('stats exposes counters, lastError and open timing', async (t) => {

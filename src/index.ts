@@ -44,7 +44,7 @@ export { countWindow, timeWindow } from './circuit-breaker/window'
 export type { Window } from './circuit-breaker/window'
 
 export { memoryStore } from './circuit-breaker/state-store'
-export type { StateStore, BreakerState, WindowCounters, MemoryStoreOptions } from './circuit-breaker/state-store'
+export type { StateStore, BreakerState, WindowCounters, LatencyStats, MemoryStoreOptions } from './circuit-breaker/state-store'
 
 export { bulkhead } from './bulkhead/bulkhead'
 export type { BulkheadOptions, BulkheadEvents, BulkheadPolicy, BulkheadStats } from './bulkhead/bulkhead'

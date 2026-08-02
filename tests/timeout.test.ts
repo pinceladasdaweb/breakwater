@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { timeout } from '../src/timeout/timeout'
 import { isTimeoutError, TimeoutError } from '../src/errors'
 
-import { drain } from './helpers'
+import { drain, rejectsOnAbort } from './helpers'
 
 describe('timeout()', () => {
   test('rejects invalid ms, naming the option', () => {
@@ -39,11 +39,7 @@ describe('timeout()', () => {
     const events: unknown[] = []
     policy.on('timeout', (e) => events.push(e))
 
-    const promise = policy.execute(async ({ signal }) => {
-      return await new Promise((_resolve, reject) => {
-        signal.addEventListener('abort', () => reject(signal.reason), { once: true })
-      })
-    })
+    const promise = policy.execute(rejectsOnAbort())
     const assertion = assert.rejects(promise, (error: unknown) => {
       assert.ok(isTimeoutError(error))
       assert.equal(error.ms, 50)
@@ -68,11 +64,7 @@ describe('timeout()', () => {
     // What fetch and friends reject with when their signal aborts.
     const abortError = new DOMException('The operation was aborted', 'AbortError')
 
-    const promise = policy.execute(async ({ signal }) => {
-      return await new Promise((_resolve, reject) => {
-        signal.addEventListener('abort', () => reject(abortError), { once: true })
-      })
-    })
+    const promise = policy.execute(rejectsOnAbort(abortError))
     const assertion = assert.rejects(promise, (error: unknown) => {
       assert.ok(error instanceof TimeoutError)
       assert.equal(error.cause, abortError)
@@ -148,6 +140,46 @@ describe('timeout()', () => {
     t.mock.timers.tick(100)
     await assertion
     assert.equal(events.length, 0)
+  })
+
+  test('external abort after the deadline still counts as cancellation, not timeout', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const policy = timeout(50)
+    const events: unknown[] = []
+    policy.on('timeout', (e) => events.push(e))
+    const controller = new AbortController()
+
+    const promise = policy.execute(async ({ signal }) => {
+      return await new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => setTimeout(() => reject(signal.reason), 100), { once: true })
+      })
+    }, { signal: controller.signal })
+    const assertion = assert.rejects(promise, isTimeoutError)
+
+    await drain()
+    t.mock.timers.tick(50) // the deadline fires first...
+    await drain()
+    controller.abort(new Error('caller gave up right after')) // ...then the caller cancels
+    await drain()
+    t.mock.timers.tick(100) // and the function finally surfaces the abort reason
+    await assertion
+
+    // The rejection is the TimeoutError the deadline minted, but the caller
+    // cancelled before the call settled: telemetry must stay silent.
+    assert.equal(events.length, 0)
+  })
+
+  test('no timer outlives a settled call', async () => {
+    // Real timers on purpose: the promise being pinned is a real event-loop
+    // handle ("clearTimeout in the finally guarantees nothing outlives the
+    // call"). The deadline is huge so nothing fires if the clear is broken.
+    const policy = timeout(600_000)
+
+    const before = process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length
+    await policy.execute(() => 'fast')
+    const after = process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length
+
+    assert.equal(after, before)
   })
 
   test('aggressive: external abort rejects promptly even though fn ignores signals', async (t) => {
@@ -245,11 +277,7 @@ describe('timeout()', () => {
     const policy = timeout(1_000)
     const controller = new AbortController()
 
-    const promise = policy.execute(async ({ signal }) => {
-      return await new Promise((_resolve, reject) => {
-        signal.addEventListener('abort', () => reject(signal.reason), { once: true })
-      })
-    }, { signal: controller.signal })
+    const promise = policy.execute(rejectsOnAbort(), { signal: controller.signal })
     const assertion = assert.rejects(promise, /user cancelled/)
 
     controller.abort(new Error('user cancelled'))
