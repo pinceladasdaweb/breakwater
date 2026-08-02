@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## 0.7.0 (2026-08-02)
+
+* build: type check against TypeScript 6 and 7 side by side by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/814cf1d31ce43c762ba46ed86b7f8193eabd945a)
+* chore: allow chore/ as a branch name prefix by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/a9b44633ff0a4891ff27656d28fb799963d1e196)
+* chore: accept every commitlint type as a branch prefix by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/60d89a6c77b0fe6c93378da4096c2a451bdc5fbe)
+* test: share the abort and gate idioms through helpers by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/b59f64ae81e5f098dde7242dc3483fb1cb153b86)
+* feat: report call latency in the circuit breaker stats (minor) by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/78c06c08c2cebbb60423e12059b126b2a7e363fe)
+* docs: add contributing, security, conduct and issue templates by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/076104ea1714ddc13c4eecc3330ab5d161985d7a)
+* feat: breakwater/prometheus — ready-made prom-client collectors (minor) by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/ebae8cdd396f66465141dfb74f50cd29b7347632)
+* docs: add a runnable Prometheus + Grafana demo under examples/ by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/ea20e3c1ed7bfe5d28bb2780e1a3f8d2902f9bef)
+* docs: mark the Prometheus adapter as shipped in the comparison table by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/48dbc0b1a21e5e476aa594a021cbdfa08d5701bb)
+* refactor: remove two provably dead paths the mutation report exposed by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/7d8d8dfc889ae06ec8b37e5552f26dc12cc19d69)
+
+
 ## 0.6.0 (2026-08-01)
 
 * fix: report one metrics name per policy when a registry entry is renamed by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/818ea9d9182490a3cdc3903ba0a8b8312dc0f0cc)
