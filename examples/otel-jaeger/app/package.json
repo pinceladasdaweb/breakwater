@@ -1,0 +1,13 @@
+{
+  "name": "breakwater-otel-demo",
+  "private": true,
+  "type": "module",
+  "description": "Demo service: breakwater spans in Jaeger and OTel metrics in Prometheus, under a scripted outage.",
+  "dependencies": {
+    "breakwater": "^0.9.0",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/sdk-node": "^0.221.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.221.0",
+    "@opentelemetry/exporter-prometheus": "^0.221.0"
+  }
+}

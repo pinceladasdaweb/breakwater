@@ -129,3 +129,6 @@ exact dashboard.
 accepts one accepts it: `resilience({ metrics })`, `attachMetrics()` for
 hand-built [`compose()`](composition.md) pipelines, or side by side with a
 custom collector of your own.
+
+OTel-native stack instead? [`breakwater/otel`](otel.md) emits the same eight
+signals as OpenTelemetry instruments — and adds spans.
