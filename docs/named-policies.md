@@ -78,7 +78,8 @@ policies.define('partner-quota', {
 ```
 
 The circuit breaker is the one exception: whatever it reports to metrics, its
-state is always keyed by the registry name, so a
+state is keyed by the registry name (unless you set `circuitBreaker.name`
+yourself — explicit wins there too), so a
 [shared state store](circuit-breaker.md#pluggable-state-statestore) recognises the same
 circuit across instances and restarts even if you rename the pipeline.
 

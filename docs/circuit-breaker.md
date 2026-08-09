@@ -135,6 +135,11 @@ breaker.stats()            // snapshot, see below
 }
 ```
 
+`openedAt` is present while the circuit is `open` or `half-open`, and
+`nextAttemptAt` only while `open` — a closed or isolated circuit reports
+neither, so a dashboard can never show a countdown on a circuit that is not
+counting down.
+
 The latency tells you *which* failure you are looking at: a p95 that jumped to
 the timeout while the rate climbed is a dependency slowing down, whereas fast
 failures at a healthy p95 are something rejecting you outright.
@@ -150,13 +155,21 @@ rejection would put real work on the rejection path.
 Custom stores opt in by implementing the optional `getLatency` method; one
 that does not simply reports no latency.
 
+One sizing note: summarising sorts the window's durations, so `stats()` cost
+grows with `countWindow` size. Windows in the hundreds are free; if you
+genuinely need hundreds of thousands of calls in the window, prefer
+`timeWindow`, which samples a bounded set per bucket.
+
 `CircuitOpenError` carries the counters in `error.stats` — perfect for a
 `Retry-After` header:
 
 ```ts
 catch (error) {
   if (isCircuitOpenError(error)) {
-    const retryAfter = Math.ceil((error.stats.nextAttemptAt! - Date.now()) / 1000)
+    // nextAttemptAt is present while the circuit is open; a rejection from a
+    // saturated half-open period carries no forecast, hence the fallback.
+    const untilProbe = (error.stats.nextAttemptAt ?? Date.now()) - Date.now()
+    const retryAfter = Math.max(1, Math.ceil(untilProbe / 1000))
     return res.set('Retry-After', String(retryAfter)).status(503).end()
   }
 }
@@ -194,8 +207,21 @@ With a custom store, the store owns the counter aggregation (the breaker's
 `window` option is ignored) and a stable `name` is required. Every `StateStore`
 method may be sync or async; `transition` must be an atomic compare-and-set.
 
-`getLatency` is the one optional method: implement it to have durations show
-up in `stats()`, or leave it out and everything else keeps working.
+`getLatency` is the one optional method that adds data: implement it to have
+durations show up in `stats()`, or leave it out and everything else keeps
+working. `delete` is the optional method that removes it: a shared store
+keyed by dynamic names (per host, per tenant) accumulates one entry per name
+forever unless you call `store.delete(name)` when a name retires — and note
+that a breaker created **without** a `name` gets a random one, so never
+create anonymous breakers against a shared store.
+
+Errors are contained by role and by moment: while the breaker is *deciding*
+an admission (`getState`, `transition`, `acquireProbe` on the way in) or
+serving a manual control call, a store throw propagates — a breaker that
+cannot decide must not admit. Once an execution has *settled*, every store
+error — bookkeeping writes, counter reads, even the trip/close transitions —
+is reported to `console.error` and contained: the caller's outcome is
+already decided, and no store failure may rewrite it.
 
 ## Real-world example: HTTP client with per-host breakers
 

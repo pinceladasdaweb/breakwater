@@ -200,6 +200,40 @@ describe('memoryStore latency', () => {
   })
 })
 
+describe('memoryStore lifecycle and clock', () => {
+  test('delete drops everything stored under a name', async () => {
+    const store = memoryStore({ window: countWindow(4) })
+    store.recordFailure('b', 10)
+    store.transition('b', 'closed', 'open')
+
+    store.delete?.('b')
+
+    // The name starts over: closed, empty counters, empty latency.
+    assert.equal(store.getState('b'), 'closed')
+    assert.equal((await store.getCounters('b')).totalCalls, 0)
+    assert.equal(latencyOf(store, 'b').count, 0)
+  })
+
+  test('a backwards clock step lands records in the newest bucket, never behind it', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'] })
+    t.mock.timers.setTime(1_000_000)
+    const store = memoryStore({ window: timeWindow(1_000) })
+
+    store.recordFailure('b', 1)
+    t.mock.timers.tick(900)
+    t.mock.timers.setTime(1_000_100) // clock steps back 800ms
+
+    // The record must not create an out-of-order bucket that the
+    // front-only expiry could never remove.
+    store.recordSuccess('b', 1)
+    assert.equal((await store.getCounters('b')).totalCalls, 2)
+
+    // Both age out with their (ordered) buckets — nothing immortal remains.
+    t.mock.timers.setTime(1_002_200)
+    assert.equal((await store.getCounters('b')).totalCalls, 0)
+  })
+})
+
 describe('memoryStore state transitions', () => {
   test('transition is compare-and-set', () => {
     const store = memoryStore()

@@ -699,3 +699,519 @@ describe('shared state store', () => {
     assert.equal(breaker.state, 'closed')
   })
 })
+
+describe('async store hardening', () => {
+  test('a stale probe failure delayed inside the store cannot reopen the next period', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const inner = memoryStore({ window: countWindow(10) })
+    let gate: Promise<void> | undefined
+    const store: StateStore = {
+      ...inner,
+      async recordFailure (name, ms) {
+        if (gate !== undefined) {
+          const held = gate
+          gate = undefined
+          await held
+        }
+        inner.recordFailure(name, ms)
+      }
+    }
+    const breaker = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1_000, halfOpenCalls: 2, name: 'stale', stateStore: store })
+
+    await failTimes(breaker, 1)
+    t.mock.timers.tick(1_000)
+
+    // Period 1: probe A fails but its store write stalls mid-flight...
+    const { promise: held, resolve: release } = Promise.withResolvers<void>()
+    gate = held
+    const staleProbe = breaker.execute(boom).catch(() => {})
+    await drain()
+    // ...probe B fails fast and legitimately re-opens the circuit.
+    await assert.rejects(breaker.execute(boom))
+    assert.equal(breaker.state, 'open')
+
+    // Period 2 begins and collects its first genuine success.
+    t.mock.timers.tick(1_000)
+    await breaker.execute(() => 'fresh probe 1')
+    assert.equal(breaker.state, 'half-open')
+
+    // The stale write finally lands: the failure belongs to period 1 and
+    // must not re-open the period that is busy recovering.
+    release()
+    await staleProbe
+    assert.equal(breaker.state, 'half-open')
+
+    await breaker.execute(() => 'fresh probe 2')
+    assert.equal(breaker.state, 'closed')
+  })
+
+  test('a stale probe success delayed inside the store cannot help close the next period', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const inner = memoryStore({ window: countWindow(10) })
+    let gate: Promise<void> | undefined
+    const store: StateStore = {
+      ...inner,
+      async recordSuccess (name, ms) {
+        if (gate !== undefined) {
+          const held = gate
+          gate = undefined
+          await held
+        }
+        inner.recordSuccess(name, ms)
+      }
+    }
+    const breaker = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1_000, halfOpenCalls: 3, name: 'stale-ok', stateStore: store })
+
+    await failTimes(breaker, 1)
+    t.mock.timers.tick(1_000)
+
+    const { promise: held, resolve: release } = Promise.withResolvers<void>()
+    gate = held
+    const staleProbe = breaker.execute(() => 'stale success')
+    await drain()
+    await assert.rejects(breaker.execute(boom)) // period 1 ends re-open
+    t.mock.timers.tick(1_000)
+
+    await breaker.execute(() => 'fresh probe 1') // period 2: 1 of 2 needed
+    assert.equal(breaker.state, 'half-open')
+
+    // The stale success lands now: it must not become period 2's majority.
+    release()
+    await staleProbe
+    assert.equal(breaker.state, 'half-open')
+
+    await breaker.execute(() => 'fresh probe 2')
+    assert.equal(breaker.state, 'closed')
+  })
+
+  test('a stale success landing before any fresh probe buys the new period nothing', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const inner = memoryStore({ window: countWindow(10) })
+    let gate: Promise<void> | undefined
+    const store: StateStore = {
+      ...inner,
+      async recordSuccess (name, ms) {
+        if (gate !== undefined) {
+          const held = gate
+          gate = undefined
+          await held
+        }
+        inner.recordSuccess(name, ms)
+      }
+    }
+    const breaker = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1_000, halfOpenCalls: 3, name: 'stale-first', stateStore: store })
+
+    await failTimes(breaker, 1)
+    t.mock.timers.tick(1_000)
+
+    const { promise: held, resolve: release } = Promise.withResolvers<void>()
+    gate = held
+    const staleProbe = breaker.execute(() => 'stale success')
+    await drain()
+    await assert.rejects(breaker.execute(boom)) // period 1 dies
+    t.mock.timers.tick(1_000)
+    await breaker.execute(() => 'enter period 2') // period 2, 1 of 2 needed
+    await assert.rejects(breaker.execute(boom)) // period 2 dies too
+    t.mock.timers.tick(1_000)
+
+    // Period 3 opens with zero successes; the stale gen-1 success lands
+    // FIRST. It must not count as period 3's first success.
+    await breaker.execute(() => 'enter period 3')
+    assert.equal(breaker.state, 'half-open')
+    release()
+    await staleProbe
+    assert.equal(breaker.state, 'half-open')
+
+    // Only the second GENUINE success closes.
+    await breaker.execute(() => 'fresh probe 2')
+    assert.equal(breaker.state, 'closed')
+  })
+
+  test('a store that fails to record a success never turns it into a rejection', async (t) => {
+    const reported = t.mock.method(console, 'error', () => {})
+    const inner = memoryStore({ window: countWindow(10) })
+    const store: StateStore = {
+      ...inner,
+      recordSuccess: async () => { throw new Error('redis down') }
+    }
+    const breaker = circuitBreaker({ name: 'flaky-store', stateStore: store })
+
+    assert.equal(await breaker.execute(() => 'the result'), 'the result')
+
+    assert.ok(reported.mock.callCount() >= 1)
+    assert.match(String(reported.mock.calls[0]?.arguments[0]), /state store threw/)
+  })
+
+  test('a store that fails during failure bookkeeping never masks the domain error', async (t) => {
+    t.mock.method(console, 'error', () => {})
+    const inner = memoryStore({ window: countWindow(10) })
+    const store: StateStore = {
+      ...inner,
+      getCounters: async () => { throw new Error('redis down') }
+    }
+    const breaker = circuitBreaker({ consecutiveFailures: 1, name: 'flaky-store-2', stateStore: store })
+
+    await assert.rejects(breaker.execute(boom), /downstream failure/)
+    // The local mirrors kept working: the circuit still tripped.
+    assert.equal(breaker.state, 'open')
+    await drain()
+  })
+
+  test('stats() with a rejecting async store answers from last-known values', async (t) => {
+    const reported = t.mock.method(console, 'error', () => {})
+    const inner = memoryStore({ window: countWindow(10) })
+    const store: StateStore = {
+      ...inner,
+      getCounters: async () => { throw new Error('redis down') },
+      getLatency: async () => { throw new Error('redis down') }
+    }
+    const breaker = circuitBreaker({ name: 'dark-store', stateStore: store })
+
+    const stats = breaker.stats()
+    assert.equal(stats.state, 'closed')
+    assert.equal(stats.totalCalls, 0)
+
+    // The rejections must be contained and reported, never unhandled.
+    await drain()
+    assert.ok(reported.mock.callCount() >= 1)
+  })
+
+  test('losing the closing CAS to a peer is quietly accepted', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const inner = memoryStore({ window: countWindow(10) })
+    let stealClose = true
+    const store: StateStore = {
+      ...inner,
+      transition (name, from, to) {
+        if (to === 'closed' && from === 'half-open' && stealClose) {
+          // A peer instance closed the shared circuit microseconds earlier.
+          stealClose = false
+          inner.transition(name, from, to)
+          return false
+        }
+        return inner.transition(name, from, to)
+      }
+    }
+    const breaker = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1_000, halfOpenCalls: 1, name: 'peer-close', stateStore: store })
+    const changes: string[] = []
+    breaker.on('stateChange', ({ from, to }) => changes.push(`${from}->${to}`))
+
+    await failTimes(breaker, 1)
+    t.mock.timers.tick(1_000)
+
+    // The probe succeeds; the close CAS was the peer's, so this instance
+    // announces nothing — and the next call flows through the closed circuit.
+    assert.equal(await breaker.execute(() => 'probe'), 'probe')
+    assert.equal(await breaker.execute(() => 'works'), 'works')
+    assert.ok(!changes.includes('half-open->closed'))
+  })
+
+  test('a store that fails the opening trip surfaces the domain error and retries later', async (t) => {
+    const reported = t.mock.method(console, 'error', () => {})
+    const inner = memoryStore({ window: countWindow(10) })
+    let failTrip = true
+    const store: StateStore = {
+      ...inner,
+      transition (name, from, to) {
+        if (to === 'open' && failTrip) {
+          failTrip = false
+          throw new Error('redis down')
+        }
+        return inner.transition(name, from, to)
+      }
+    }
+    const breaker = circuitBreaker({ consecutiveFailures: 1, name: 'no-trip', stateStore: store })
+
+    // The trip failed, but the caller still got the original error...
+    await assert.rejects(breaker.execute(boom), /downstream failure/)
+    assert.equal(breaker.state, 'closed')
+    assert.ok(reported.mock.callCount() >= 1)
+
+    // ...and the next failure retries the trip successfully.
+    await assert.rejects(breaker.execute(boom), /downstream failure/)
+    assert.equal(breaker.state, 'open')
+  })
+
+  test('a store that throws synchronously from reads is contained the same way', (t) => {
+    const reported = t.mock.method(console, 'error', () => {})
+    const inner = memoryStore({ window: countWindow(10) })
+    const store: StateStore = {
+      ...inner,
+      getCounters: () => { throw new Error('corrupt cache') },
+      getLatency: () => { throw new Error('corrupt cache') }
+    }
+    const breaker = circuitBreaker({ name: 'sync-throw', stateStore: store })
+
+    const stats = breaker.stats()
+
+    assert.equal(stats.state, 'closed')
+    assert.equal(stats.totalCalls, 0)
+    assert.equal(stats.latency, undefined)
+    assert.equal(reported.mock.callCount(), 2)
+  })
+
+  test('an async store feeds counters and latency as reads land, on the success path too', async () => {
+    const inner = memoryStore({ window: countWindow(10) })
+    const store: StateStore = {
+      getState: async (name) => inner.getState(name),
+      transition: async (name, from, to) => inner.transition(name, from, to),
+      recordSuccess: async (name, ms) => { inner.recordSuccess(name, ms) },
+      recordFailure: async (name, ms) => { inner.recordFailure(name, ms) },
+      getCounters: async (name) => inner.getCounters(name),
+      getLatency: async (name) => inner.getLatency?.(name) as LatencyStats,
+      resetCounters: async (name) => { inner.resetCounters(name) },
+      acquireProbe: async () => true
+    }
+    const breaker = circuitBreaker({ name: 'remote-fresh', stateStore: store })
+
+    await breaker.execute(() => 'a')
+    await breaker.execute(() => 'b')
+
+    breaker.stats() // kicks the async reads
+    await drain()
+    const stats = breaker.stats()
+
+    assert.equal(stats.totalCalls, 2)
+    assert.equal(stats.latency?.count, 2)
+  })
+
+  test('a slow old read landing after a fresh one cannot regress the stats mirror', async () => {
+    const inner = memoryStore({ window: countWindow(10) })
+    let holdFirst: Promise<void> | undefined
+    const store: StateStore = {
+      ...inner,
+      async getCounters (name) {
+        if (holdFirst !== undefined) {
+          const held = holdFirst
+          holdFirst = undefined
+          await held
+        }
+        return inner.getCounters(name)
+      }
+    }
+    const breaker = circuitBreaker({ name: 'ooo-reads', stateStore: store })
+
+    // Read #1 dispatches against an empty window and stalls...
+    const { promise: held, resolve: release } = Promise.withResolvers<void>()
+    holdFirst = held
+    breaker.stats()
+
+    // ...a call lands and read #2 (fast) feeds the mirror with 1 call.
+    await breaker.execute(() => 'ok')
+    breaker.stats()
+    await drain()
+    assert.equal(breaker.stats().totalCalls, 1)
+
+    // The stale empty read lands last: the mirror must not go back to 0.
+    release()
+    await drain()
+    assert.equal(breaker.stats().totalCalls, 1)
+  })
+
+  test('a store that fails the closing transition leaves the circuit recoverable', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const reported = t.mock.method(console, 'error', () => {})
+    const inner = memoryStore({ window: countWindow(10) })
+    let failClose = true
+    const store: StateStore = {
+      ...inner,
+      transition (name, from, to) {
+        if (to === 'closed' && from === 'half-open' && failClose) {
+          failClose = false
+          throw new Error('redis down')
+        }
+        return inner.transition(name, from, to)
+      }
+    }
+    const breaker = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1_000, halfOpenCalls: 1, name: 'no-close', stateStore: store })
+
+    await failTimes(breaker, 1)
+    t.mock.timers.tick(1_000)
+
+    // First probe succeeds but the close CAS fails: half-open is the safe
+    // degradation, and the success still surfaced to the caller.
+    assert.equal(await breaker.execute(() => 'probe 1'), 'probe 1')
+    assert.equal(breaker.state, 'half-open')
+
+    // The failed CAS was reported, not swallowed silently.
+    assert.ok(reported.mock.callCount() >= 1)
+
+    // The next probe retries the close and completes the recovery.
+    assert.equal(await breaker.execute(() => 'probe 2'), 'probe 2')
+    assert.equal(breaker.state, 'closed')
+  })
+})
+
+describe('CAS in flight across period changes', () => {
+  test('a close CAS that travels across a period flip cannot close the fresh period', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const inner = memoryStore({ window: countWindow(10) })
+    let holdClose: Promise<void> | undefined
+    const store: StateStore = {
+      ...inner,
+      async transition (name, from, to) {
+        if (from === 'half-open' && to === 'closed' && holdClose !== undefined) {
+          const held = holdClose
+          holdClose = undefined
+          await held
+        }
+        return inner.transition(name, from, to)
+      }
+    }
+    const breaker = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1_000, halfOpenCalls: 2, name: 'cas-close', stateStore: store })
+    const changes: string[] = []
+    breaker.on('stateChange', ({ from, to }) => changes.push(`${from}->${to}`))
+
+    await failTimes(breaker, 1)
+    t.mock.timers.tick(1_000)
+
+    // Period 1 earns its majority, but the closing CAS stalls in flight...
+    await breaker.execute(() => 'probe 1')
+    const { promise: held, resolve: release } = Promise.withResolvers<void>()
+    holdClose = held
+    const closing = breaker.execute(() => 'probe 2')
+    await drain()
+
+    // ...period 1 dies to a failure, and period 2 starts with one success.
+    await assert.rejects(breaker.execute(boom))
+    t.mock.timers.tick(1_000)
+    await breaker.execute(() => 'fresh probe 1')
+    assert.equal(breaker.state, 'half-open')
+
+    // The stale CAS lands now: it must not close period 2 with 1 success.
+    release()
+    assert.equal(await closing, 'probe 2')
+    assert.equal(breaker.state, 'half-open')
+    assert.ok(!changes.includes('half-open->closed'))
+
+    // Period 2 completes its own majority normally.
+    await breaker.execute(() => 'fresh probe 2')
+    assert.equal(breaker.state, 'closed')
+    assert.equal(changes.filter((c) => c === 'half-open->closed').length, 1)
+  })
+
+  test('a trip CAS that travels across a period flip cannot kill the fresh recovery', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const inner = memoryStore({ window: countWindow(10) })
+    let holdTrip: Promise<void> | undefined
+    const store: StateStore = {
+      ...inner,
+      async transition (name, from, to) {
+        if (from === 'half-open' && to === 'open' && holdTrip !== undefined) {
+          const held = holdTrip
+          holdTrip = undefined
+          await held
+        }
+        return inner.transition(name, from, to)
+      }
+    }
+    const breaker = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1_000, halfOpenCalls: 3, name: 'cas-trip', stateStore: store })
+
+    await failTimes(breaker, 1)
+    t.mock.timers.tick(1_000)
+
+    // Period 1: probe A fails and its re-opening CAS stalls in flight...
+    const { promise: held, resolve: release } = Promise.withResolvers<void>()
+    holdTrip = held
+    const staleTrip = breaker.execute(boom).catch(() => {})
+    await drain()
+
+    // ...probe B also fails and re-opens period 1 for real.
+    await assert.rejects(breaker.execute(boom))
+    assert.equal(breaker.state, 'open')
+
+    // Period 2 starts recovering.
+    t.mock.timers.tick(1_000)
+    await breaker.execute(() => 'fresh probe 1')
+    assert.equal(breaker.state, 'half-open')
+
+    // The stale trip lands now: period 2 must keep recovering.
+    release()
+    await staleTrip
+    assert.equal(await breaker.execute(() => 'fresh probe 2'), 'fresh probe 2')
+    assert.equal(breaker.state, 'closed')
+  })
+
+  test('a failing counter reset never swallows the close announcement', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const reported = t.mock.method(console, 'error', () => {})
+    const inner = memoryStore({ window: countWindow(10) })
+    const store: StateStore = {
+      ...inner,
+      resetCounters: () => { throw new Error('redis down') }
+    }
+    const breaker = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1_000, halfOpenCalls: 1, name: 'no-reset', stateStore: store })
+    const closes: string[] = []
+    breaker.on('close', ({ stats }) => closes.push(stats.state))
+
+    await failTimes(breaker, 1)
+    t.mock.timers.tick(1_000)
+    await breaker.execute(() => 'probe')
+
+    // The close CAS committed: state and event must both say so, with the
+    // failed cleanup reported instead of silently eating the transition.
+    assert.equal(breaker.state, 'closed')
+    assert.deepEqual(closes, ['closed'])
+    assert.ok(reported.mock.callCount() >= 1)
+  })
+})
+
+describe('stats timing honesty', () => {
+  test('a mirror that watched the circuit close elsewhere stops reporting open timing', async () => {
+    const store = memoryStore({ window: countWindow(10) })
+    const a = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1, name: 'shared-timing', stateStore: store })
+    const b = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1, name: 'shared-timing', stateStore: store })
+
+    await failTimes(a, 1)
+    await assert.rejects(b.execute(() => 'x'), isCircuitOpenError) // B saw it open
+    assert.notEqual(b.stats().openedAt, undefined)
+
+    // A recovers the shared circuit; B observes closed on its next call.
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await a.execute(() => 'probe 1')
+    await a.execute(() => 'probe 2')
+    assert.equal(a.state, 'closed')
+
+    await b.execute(() => 'ok')
+    const stats = b.stats()
+    assert.equal(stats.state, 'closed')
+    assert.equal(stats.openedAt, undefined)
+    assert.equal(stats.nextAttemptAt, undefined)
+  })
+
+  test('isolation reports no probing forecast — it never expires on its own', async () => {
+    const breaker = circuitBreaker({ consecutiveFailures: 1 })
+    await failTimes(breaker, 1)
+    await breaker.isolate()
+
+    const stats = breaker.stats()
+    assert.equal(stats.state, 'isolated')
+    assert.equal(stats.openedAt, undefined)
+    assert.equal(stats.nextAttemptAt, undefined)
+  })
+
+  test('half-open keeps openedAt but drops the already-past nextAttemptAt', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    t.mock.timers.setTime(1_000_000)
+    const breaker = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1_000, halfOpenCalls: 2 })
+
+    await failTimes(breaker, 1)
+    t.mock.timers.tick(1_000)
+    await breaker.execute(() => 'probe 1')
+    assert.equal(breaker.state, 'half-open')
+
+    const stats = breaker.stats()
+    assert.equal(stats.openedAt, 1_000_000)
+    assert.equal(stats.nextAttemptAt, undefined)
+  })
+
+  test('unisolate clears lastError along with the counters', async () => {
+    const breaker = circuitBreaker({ consecutiveFailures: 5 })
+    await failTimes(breaker, 1)
+    await breaker.isolate()
+
+    await breaker.unisolate()
+
+    assert.equal(breaker.stats().lastError, undefined)
+  })
+})

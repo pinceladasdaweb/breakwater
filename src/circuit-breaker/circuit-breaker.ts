@@ -21,9 +21,13 @@ export interface CircuitBreakerStats {
    */
   latency?: LatencyStats
   lastError?: unknown
-  /** Epoch ms of the moment the circuit last opened. */
+  /**
+   * Epoch ms of the moment the circuit opened. Present while the state is
+   * `open` or `half-open`; absent otherwise — a closed or isolated circuit
+   * has no open period to report.
+   */
   openedAt?: number
-  /** Epoch ms of the moment half-open probing becomes allowed. */
+  /** Epoch ms of the moment half-open probing becomes allowed. Present only while `open`. */
   nextAttemptAt?: number
 }
 
@@ -129,27 +133,75 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
   // ignored so they cannot close, reopen or unblock the current period.
   let probeGeneration = 0
 
+  // Bookkeeping must never change an execution's outcome or crash the
+  // process: a store that fails to RECORD degrades to last-known values,
+  // unlike the admission decisions (getState/transition/acquireProbe),
+  // whose errors do propagate — a breaker that cannot decide must not admit.
+  const reportStoreError = (error: unknown): void => {
+    console.error('breakwater: circuit breaker state store threw', error)
+  }
+
   // nextAttemptAt is always openedAt + halfOpenAfter; derived, never stored.
   const nextAttemptAt = (): number | undefined =>
     openedAt === undefined ? undefined : openedAt + halfOpenAfter
 
+  /**
+   * The open timing is only meaningful while the circuit is actually open
+   * (openedAt also during half-open, as the moment the period started).
+   * Gating here keeps a mirror that went stale — e.g. a peer closed the
+   * shared circuit — from showing a countdown on a closed breaker.
+   */
+  const timing = (): Pick<CircuitBreakerStats, 'openedAt' | 'nextAttemptAt'> => {
+    if (localState === 'open') return { openedAt, nextAttemptAt: nextAttemptAt() }
+    if (localState === 'half-open') return { openedAt }
+    return {}
+  }
+
+  // Monotonic read tokens: async reads land in dispatch order only by luck,
+  // and a slow old read must not overwrite the mirror a newer one just fed.
+  let countersReadSeq = 0
+  let latencyReadSeq = 0
+
   const syncCounters = (): void => {
-    const counters = store.getCounters(name)
-    if (!(counters instanceof Promise)) lastCounters = counters
+    try {
+      const counters = store.getCounters(name)
+      // An async store feeds the mirror when the read lands; stats() answers
+      // synchronously from last-known values either way.
+      if (counters instanceof Promise) {
+        const seq = ++countersReadSeq
+        counters.then((value) => { if (seq === countersReadSeq) lastCounters = value }, reportStoreError)
+      } else {
+        lastCounters = counters
+      }
+    } catch (error) {
+      reportStoreError(error)
+    }
+  }
+
+  const syncLatency = (): void => {
+    if (store.getLatency === undefined) return
+    try {
+      const latency = store.getLatency(name)
+      if (latency instanceof Promise) {
+        const seq = ++latencyReadSeq
+        latency.then((value) => { if (seq === latencyReadSeq) lastLatency = value }, reportStoreError)
+      } else {
+        lastLatency = latency
+      }
+    } catch (error) {
+      reportStoreError(error)
+    }
   }
 
   /** Counters only — cheap enough for the rejection path. */
   const snapshot = (): CircuitBreakerStats => {
     syncCounters()
-    return { state: localState, ...lastCounters, lastError, openedAt, nextAttemptAt: nextAttemptAt() }
+    return { state: localState, ...lastCounters, lastError, ...timing() }
   }
 
   const stats = (): CircuitBreakerStats => {
+    syncLatency()
     const current = snapshot()
-    const latency = store.getLatency?.(name)
-    // Same rule as the counters: an async store keeps the last known value
-    // rather than leaking a pending promise into the snapshot.
-    if (latency !== undefined && !(latency instanceof Promise)) lastLatency = latency
     return lastLatency === undefined ? current : { ...current, latency: lastLatency }
   }
 
@@ -162,8 +214,15 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
     emitter.emit('stateChange', { from, to, stats: snapshot, correlationId })
   }
 
-  const trip = async (from: BreakerState, correlationId?: string): Promise<void> => {
+  const trip = async (from: BreakerState, correlationId?: string, guardGen?: number): Promise<void> => {
     if (await store.transition(name, from, 'open')) {
+      if (guardGen !== undefined && guardGen !== probeGeneration) {
+        // The half-open period this failure belonged to ended while the CAS
+        // travelled: the trip landed on a FRESH period. Hand the state back
+        // — best effort until stores can fence the CAS with a generation.
+        await store.transition(name, 'open', from)
+        return
+      }
       openedAt = Date.now()
       consecutive = 0
       changeState(from, 'open', correlationId)
@@ -177,43 +236,84 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
     throw reason === 'isolated' ? new IsolatedError() : new CircuitOpenError(snapshot())
   }
 
-  const onSuccess = async (isCurrentProbe: boolean, durationMs: number, correlationId: string): Promise<void> => {
-    await store.recordSuccess(name, durationMs)
+  const onSuccess = async (wasProbe: boolean, probeGen: number, durationMs: number, correlationId: string): Promise<void> => {
+    try {
+      await store.recordSuccess(name, durationMs)
+    } catch (error) {
+      reportStoreError(error)
+    }
     consecutive = 0
     syncCounters()
     emitter.emit('success', { durationMs, correlationId })
 
-    if (isCurrentProbe) {
+    // The generation is re-checked HERE, after the store write: with an
+    // async store the write can outlive the half-open period it belongs to,
+    // and a stale success must not count towards the current one's majority.
+    if (wasProbe && probeGen === probeGeneration) {
       probeSuccesses++
-      if (probeSuccesses >= successesToClose && await store.transition(name, 'half-open', 'closed')) {
-        await store.resetCounters(name)
-        openedAt = undefined
-        changeState('half-open', 'closed', correlationId)
+      if (probeSuccesses >= successesToClose) {
+        try {
+          if (await store.transition(name, 'half-open', 'closed')) {
+            if (probeGen !== probeGeneration) {
+              // The period flipped while the CAS travelled: this close
+              // belongs to a dead period and just closed a fresh one. Hand
+              // the state back — best effort until stores can fence the CAS.
+              await store.transition(name, 'closed', 'half-open')
+              return
+            }
+            // The close is committed: announce it no matter what the
+            // bookkeeping below does.
+            try {
+              await store.resetCounters(name)
+            } catch (error) {
+              reportStoreError(error)
+            }
+            openedAt = undefined
+            changeState('half-open', 'closed', correlationId)
+          }
+        } catch (error) {
+          // Closing is retried by the next probe; staying half-open is the
+          // safe degradation when the store cannot answer.
+          reportStoreError(error)
+        }
       }
     }
   }
 
-  const onFailure = async (stateAtEntry: BreakerState, isCurrentProbe: boolean, error: unknown, durationMs: number, correlationId: string): Promise<void> => {
-    await store.recordFailure(name, durationMs)
-    lastError = error
-    lastCounters = await store.getCounters(name)
+  const onFailure = async (stateAtEntry: BreakerState, probeGen: number, error: unknown, durationMs: number, correlationId: string): Promise<void> => {
+    try {
+      await store.recordFailure(name, durationMs)
+      lastError = error
+      lastCounters = await store.getCounters(name)
+    } catch (storeError) {
+      lastError = error
+      reportStoreError(storeError)
+    }
     emitter.emit('failure', { error, durationMs, correlationId })
 
-    if (stateAtEntry === 'half-open') {
-      // A failure from a stale probe belongs to an aborted period and must
-      // not reopen the circuit the current period is recovering.
-      if (isCurrentProbe) await trip('half-open', correlationId)
-      return
-    }
+    try {
+      if (stateAtEntry === 'half-open') {
+        // Re-checked after the awaits: a failure from a stale probe belongs
+        // to an aborted period and must not reopen the circuit the current
+        // period is recovering. The guardGen covers the remaining window —
+        // the CAS itself travelling while the period flips.
+        if (probeGen === probeGeneration) await trip('half-open', correlationId, probeGen)
+        return
+      }
 
-    if (consecutiveFailures !== undefined) {
-      consecutive++
-      if (consecutive >= consecutiveFailures) await trip('closed', correlationId)
-      return
-    }
+      if (consecutiveFailures !== undefined) {
+        consecutive++
+        if (consecutive >= consecutiveFailures) await trip('closed', correlationId)
+        return
+      }
 
-    if (lastCounters.totalCalls >= minimumCalls && lastCounters.failureRate >= failureThreshold) {
-      await trip('closed', correlationId)
+      if (lastCounters.totalCalls >= minimumCalls && lastCounters.failureRate >= failureThreshold) {
+        await trip('closed', correlationId)
+      }
+    } catch (storeError) {
+      // A store that cannot execute the trip leaves the local mirror as-is;
+      // the next failure retries. The caller still gets the original error.
+      reportStoreError(storeError)
     }
   }
 
@@ -269,14 +369,12 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
 
     try {
       const result = await fn(ctx)
-      const isCurrentProbe = state === 'half-open' && probeGen === probeGeneration
-      await onSuccess(isCurrentProbe, Date.now() - started, ctx.correlationId)
+      await onSuccess(state === 'half-open', probeGen, Date.now() - started, ctx.correlationId)
       return result
     } catch (error) {
       // Cancellations and ignored errors count as neither success nor failure.
       if (!ctx.signal.aborted && failureIf(error)) {
-        const isCurrentProbe = state === 'half-open' && probeGen === probeGeneration
-        await onFailure(state, isCurrentProbe, error, Date.now() - started, ctx.correlationId)
+        await onFailure(state, probeGen, error, Date.now() - started, ctx.correlationId)
       }
       throw error
     } finally {
@@ -310,15 +408,26 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
 
     async unisolate () {
       if (await store.transition(name, 'isolated', 'closed')) {
-        await store.resetCounters(name)
+        // The transition is committed: the caller must see it announced even
+        // if the counter cleanup fails (contained like any bookkeeping).
+        try {
+          await store.resetCounters(name)
+        } catch (error) {
+          reportStoreError(error)
+        }
         consecutive = 0
         openedAt = undefined
+        lastError = undefined
         changeState('isolated', 'closed')
       }
     },
 
     async reset () {
-      await store.resetCounters(name)
+      try {
+        await store.resetCounters(name)
+      } catch (error) {
+        reportStoreError(error)
+      }
       consecutive = 0
       probeSuccesses = 0
       lastError = undefined
