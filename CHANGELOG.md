@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 0.8.0 (2026-08-09)
+
+* fix: clamp oversized retry delays and reject misspelled modes at construction by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/49d1e8b097746e4ac4b8e83500c2c7b98095545f)
+* fix: validate the rate limit strategy and cheapen the rejection path by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/552b23dd861a75308727063c85b68f0ff4eea972)
+* fix: contain state store failures and fence stale writes in the breaker (minor) by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/e8ca1334fd533350a29e6c3037b07053df0331c5)
+* fix: stop counting cancellations as failures in pipeline metrics by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/7483fd8597940ea5c5c3b0f1c830be8e016aa24f)
+* docs: warn that fallback handler types are not connected to execute<T>() by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/968b17df3a00537fe3a4e2183864f27aba678928)
+* test: pin the admin ops surviving a failing counter cleanup by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/aab3e26d28fc76dc6a56210478adbb6b97cfaed1)
+
+
 ## 0.7.0 (2026-08-02)
 
 * build: type check against TypeScript 6 and 7 side by side by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/814cf1d31ce43c762ba46ed86b7f8193eabd945a)
