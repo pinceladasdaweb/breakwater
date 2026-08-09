@@ -48,7 +48,7 @@ const charge = await payments.execute(({ signal }) => api.post('/charge', body, 
 | Policy composition with explicit ordering | ✅ first-class | ❌ | ✅ |
 | Named policy registry (central config) | ✅ | ❌ | ❌ |
 | Typed events + pluggable metrics collector | ✅ native | ➖ via plugin | ❌ |
-| Prometheus / OpenTelemetry adapters | ✅ [`breakwater/prometheus`](docs/prometheus.md) · OTel planned | ➖ via plugin | ❌ |
+| Prometheus / OpenTelemetry adapters | ✅ [`/prometheus`](docs/prometheus.md) · [`/otel`](docs/otel.md) | ➖ via plugin | ❌ |
 | Distributed circuit breaker state (Redis) | 🔜 planned | ❌ | ❌ |
 | TypeScript | ✅ native | ➖ via `@types` | ✅ native |
 | Runtime dependencies | **0** | 0 | 0 |
@@ -56,7 +56,7 @@ const charge = await payments.execute(({ signal }) => api.post('/charge', body, 
 Design principles:
 
 - **TypeScript first** — strict types, no `@types` package
-- **Zero dependencies in the core** — integrations (Redis, Prometheus, OTel) will ship as optional entry points
+- **Zero dependencies in the core** — integrations ship as optional entry points (Prometheus and OpenTelemetry today, Redis planned)
 - **Declarative composition** — policies combine into pipelines with explicit, documented ordering
 - **Native observability** — typed events and a pluggable `MetricsCollector` in the core
 
@@ -254,9 +254,10 @@ a whole composition in one call, and `metricsPolicy(collector)` measures the
 pipeline as a regular outermost policy. Compositions also expose an
 aggregated `stats()` of their inner policies.
 
-Don't want to write a collector? **`breakwater/prometheus`** ships ready-made
-prom-client metrics — executions, durations, rejections and circuit states —
-plus a Grafana dashboard to import:
+Don't want to write a collector? Two ready-made adapters ship as optional
+entry points. **`breakwater/prometheus`** emits prom-client metrics —
+executions, durations, rejections and circuit states — plus a Grafana
+dashboard to import:
 
 ```ts
 import { prometheusCollector } from 'breakwater/prometheus' // prom-client is a peer dependency
@@ -264,8 +265,18 @@ import { prometheusCollector } from 'breakwater/prometheus' // prom-client is a 
 const policy = resilience({ name: 'payments-api', metrics: prometheusCollector() })
 ```
 
-See [docs/prometheus.md](docs/prometheus.md). An OpenTelemetry adapter is
-planned as another optional entry point.
+**`breakwater/otel`** emits the same signals as OpenTelemetry metrics, and
+adds `spanPolicy()` — a composable policy that wraps each execution in an
+active span, so instrumented HTTP clients and database drivers nest under it
+in the trace:
+
+```ts
+import { otelCollector, spanPolicy } from 'breakwater/otel' // @opentelemetry/api is a peer dependency
+
+const policy = resilience({ name: 'payments-api', metrics: otelCollector() })
+```
+
+See [docs/prometheus.md](docs/prometheus.md) and [docs/otel.md](docs/otel.md).
 
 ## Errors
 
@@ -308,6 +319,7 @@ See [docs/errors.md](docs/errors.md).
 - [Named policies](docs/named-policies.md)
 - [Observability: events, stats & metrics](docs/observability.md)
 - [Prometheus adapter](docs/prometheus.md) — ready-made prom-client collectors + a Grafana dashboard
+- [OpenTelemetry adapter](docs/otel.md) — OTel metrics + spans as a composable policy
 - [Errors](docs/errors.md)
 
 ## Requirements

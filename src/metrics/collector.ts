@@ -1,8 +1,8 @@
 /**
  * The interface metrics adapters implement. Every method is optional — a
  * collector implements only what it cares about. `breakwater/prometheus`
- * is an implementation of this interface, and the planned OpenTelemetry
- * entry point will be another; the core never imports either client.
+ * and `breakwater/otel` are implementations of this interface; the core
+ * never imports either client.
  */
 export interface MetricsCollector {
   /**
