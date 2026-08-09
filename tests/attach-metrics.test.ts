@@ -189,6 +189,20 @@ describe('metricsPolicy()', () => {
     assert.deepEqual(durations, [75])
   })
 
+  test('a cancelled execution reports neither success nor failure', async () => {
+    const outcomes: string[] = []
+    const policy = metricsPolicy({ onExecution: (e) => outcomes.push(e.outcome) })
+    const controller = new AbortController()
+
+    await assert.rejects(policy.execute(({ signal }) => {
+      controller.abort(new Error('cancelled'))
+      assert.equal(signal.aborted, true)
+      throw new Error('aborted work')
+    }, { signal: controller.signal }))
+
+    assert.deepEqual(outcomes, [])
+  })
+
   test('reports success and failure with total pipeline duration', async () => {
     const events: string[] = []
     const pipeline = compose(

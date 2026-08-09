@@ -126,6 +126,11 @@ libraries as optional peer dependencies.
 
 ## Manual pipelines: `attachMetrics()` and `metricsPolicy()`
 
+One accounting rule to know: a **cancelled** execution (the caller aborted
+before it settled) reports neither `success` nor `failure` to `onExecution` —
+cancellation is not an outcome anywhere in breakwater, metrics included, so a
+deploy's worth of client disconnects never inflates your failure rate.
+
 Building with `compose()` instead of `resilience()`? The same wiring is one
 call — `attachMetrics` walks the composition, discovers each policy by its
 `kind` and subscribes the right events:

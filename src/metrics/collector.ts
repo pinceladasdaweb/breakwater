@@ -5,7 +5,11 @@
  * entry point will be another; the core never imports either client.
  */
 export interface MetricsCollector {
-  /** One completed execution through the pipeline. */
+  /**
+   * One completed execution through the pipeline. Cancelled executions
+   * (context signal aborted) are not reported: cancellation is neither a
+   * success nor a failure anywhere in breakwater, metrics included.
+   */
   onExecution?: (event: {
     policy: string
     name?: string
