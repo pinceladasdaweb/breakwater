@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## 0.9.0 (2026-08-09)
+
+* feat: add OpenTelemetry adapter with spans and metrics under breakwater/otel by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/9b7cc839362ae631d1934bdafd3d785cf797033d)
+
+
 ## 0.8.0 (2026-08-09)
 
 * fix: clamp oversized retry delays and reject misspelled modes at construction by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/49d1e8b097746e4ac4b8e83500c2c7b98095545f)
