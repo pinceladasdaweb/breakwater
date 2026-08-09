@@ -1132,6 +1132,30 @@ describe('CAS in flight across period changes', () => {
     assert.equal(breaker.state, 'closed')
   })
 
+  test('unisolate and reset survive a failing counter cleanup', async (t) => {
+    const reported = t.mock.method(console, 'error', () => {})
+    const inner = memoryStore({ window: countWindow(10) })
+    const store: StateStore = {
+      ...inner,
+      resetCounters: () => { throw new Error('redis down') }
+    }
+    const breaker = circuitBreaker({ consecutiveFailures: 1, name: 'admin-ops', stateStore: store })
+    const changes: string[] = []
+    breaker.on('stateChange', ({ from, to }) => changes.push(`${from}->${to}`))
+
+    // unisolate: the committed transition is announced despite the cleanup.
+    await breaker.isolate()
+    await breaker.unisolate()
+    assert.equal(breaker.state, 'closed')
+    assert.ok(changes.includes('isolated->closed'))
+
+    // reset: an open circuit still returns to closed.
+    await failTimes(breaker, 1)
+    await breaker.reset()
+    assert.equal(breaker.state, 'closed')
+    assert.ok(reported.mock.callCount() >= 2)
+  })
+
   test('a failing counter reset never swallows the close announcement', async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
     const reported = t.mock.method(console, 'error', () => {})
