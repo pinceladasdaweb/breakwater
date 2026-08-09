@@ -212,6 +212,37 @@ describe('retry()', () => {
     assert.equal(calls, 1)
   })
 
+  test('a delay past the setTimeout ceiling waits, instead of firing after ~1ms', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const policy = retry({ attempts: 2, backoff: fixed(2 ** 31) })
+    let calls = 0
+
+    const promise = policy.execute(() => { calls++; throw new Error('down') })
+    const assertion = assert.rejects(promise, isRetryExhaustedError)
+
+    await drain()
+    t.mock.timers.tick(5) // where the overflow bug would have fired already
+    await drain()
+    assert.equal(calls, 1)
+
+    t.mock.timers.tick(2 ** 31 - 1) // the clamped ceiling actually elapses
+    await assertion
+    assert.equal(calls, 2)
+  })
+
+  test('a custom backoff returning NaN or Infinity fails loudly, not as a hot loop', async () => {
+    for (const bad of [Number.NaN, Infinity, -1]) {
+      const policy = retry({ attempts: 5, backoff: () => bad })
+      let calls = 0
+
+      await assert.rejects(
+        policy.execute(() => { calls++; throw new Error('down') }),
+        { name: 'RangeError', message: /backoff delay/ }
+      )
+      assert.equal(calls, 1)
+    }
+  })
+
   test('a factory-level signal also cancels retries', async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] })
     const controller = new AbortController()

@@ -77,5 +77,7 @@ describe('exponential()', () => {
   test('rejects invalid options, naming the offending one', () => {
     assert.throws(() => exponential({ factor: 0 }), { name: 'RangeError', message: /factor/ })
     assert.throws(() => exponential({ initial: -1 }), { name: 'RangeError', message: /initial/ })
+    // A typo would otherwise make the switch return undefined delays.
+    assert.throws(() => exponential({ jitter: 'ful' as never }), { name: 'RangeError', message: /jitter/ })
   })
 })
