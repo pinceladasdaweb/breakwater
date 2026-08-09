@@ -13,6 +13,10 @@ describe('timeout()', () => {
     assert.throws(() => timeout(Infinity), { name: 'RangeError', message: /timeout ms/ })
   })
 
+  test('rejects a misspelled mode instead of silently running cooperative', () => {
+    assert.throws(() => timeout(50, { mode: 'agressive' as never }), { name: 'RangeError', message: /mode/ })
+  })
+
   test('an AbortError-shaped domain failure is not rewritten as a timeout', async () => {
     const policy = timeout(1_000)
     const events: unknown[] = []

@@ -38,6 +38,13 @@ export interface LatencyStats {
  * - `transition` must be atomic (compare-and-set).
  * - Graceful degradation is the adapter's job: if the backend is down, the
  *   adapter answers from its local cache. The breaker never needs to know.
+ * - Errors are contained by role and by moment. While the breaker is
+ *   DECIDING an admission (`getState`, `transition`, `acquireProbe` on the
+ *   way in) or serving a manual control call, a throw propagates to the
+ *   caller — a breaker that cannot decide must not admit. Once an execution
+ *   has SETTLED, every store error — bookkeeping writes, counter reads,
+ *   even the trip/close transitions — is reported and contained: the
+ *   caller's outcome is already decided and no store failure may rewrite it.
  */
 export interface StateStore {
   getState: (name: string) => BreakerState | Promise<BreakerState>
@@ -62,6 +69,12 @@ export interface StateStore {
    * Distributed: a lock so only one instance probes.
    */
   acquireProbe: (name: string) => boolean | Promise<boolean>
+  /**
+   * Optional: drops everything stored under `name`. A shared store whose
+   * breaker names are dynamic (per host, per tenant) accumulates one entry
+   * per name and never forgets on its own — call this when a name retires.
+   */
+  delete?: (name: string) => void | Promise<void>
   /** Distributed only: push state changes to other instances. */
   subscribe?: (name: string, onChange: (state: BreakerState) => void) => () => void
 }
@@ -120,13 +133,15 @@ const sample = (durations: Durations, ms: number): void => {
 }
 
 /** Nearest-rank quantile over an ascending array. */
-const quantile = (sorted: number[], q: number): number =>
+const quantile = (sorted: Float64Array, q: number): number =>
   sorted[Math.max(1, Math.ceil(q * sorted.length)) - 1] as number
 
-const summarise = (values: number[]): LatencyStats => {
+// Takes (and mutates) a typed array: numeric sort without comparator calls
+// keeps a large count window's summary from stalling a health endpoint.
+const summarise = (values: Float64Array): LatencyStats => {
   if (values.length === 0) return { count: 0, min: 0, max: 0, mean: 0, p50: 0, p95: 0, p99: 0 }
 
-  values.sort((a, b) => a - b)
+  values.sort()
   let total = 0
   for (const value of values) total += value
 
@@ -194,9 +209,14 @@ export function memoryStore (options: MemoryStoreOptions = {}): StateStore {
       return
     }
 
-    const now = Date.now()
+    let now = Date.now()
+    const newest = data.buckets[data.buckets.length - 1]
+    // Monotonic clamp, as in the rate limiter: after a backwards clock step
+    // the record lands in the newest bucket instead of creating an
+    // out-of-order one that the front-only expiry could never remove.
+    if (newest !== undefined && now < newest.start) now = newest.start
     const start = now - (now % data.bucketMs)
-    let current = data.buckets[data.buckets.length - 1]
+    let current = newest
     if (current === undefined || current.start !== start) {
       current = { start, successes: 0, failures: 0, durations: freshDurations(BUCKET_SAMPLES) }
       data.buckets.push(current)
@@ -222,18 +242,21 @@ export function memoryStore (options: MemoryStoreOptions = {}): StateStore {
 
     getLatency (name) {
       const data = entry(name).window
-      const values: number[] = []
 
       if (data.kind === 'count') {
-        for (let i = 0; i < data.filled; i++) values.push(data.durations[i] as number)
-      } else {
-        expireBuckets(data, Date.now())
-        for (const bucket of data.buckets) {
-          const { ring, filled } = bucket.durations
-          for (let i = 0; i < filled; i++) values.push(ring[i] as number)
-        }
+        return summarise(data.durations.slice(0, data.filled))
       }
 
+      expireBuckets(data, Date.now())
+      let total = 0
+      for (const bucket of data.buckets) total += bucket.durations.filled
+      const values = new Float64Array(total)
+      let offset = 0
+      for (const bucket of data.buckets) {
+        const { ring, filled } = bucket.durations
+        values.set(ring.subarray(0, filled), offset)
+        offset += filled
+      }
       return summarise(values)
     },
 
@@ -265,6 +288,10 @@ export function memoryStore (options: MemoryStoreOptions = {}): StateStore {
       entry(name).window = freshWindow()
     },
 
-    acquireProbe: () => true
+    acquireProbe: () => true,
+
+    delete (name) {
+      entries.delete(name)
+    }
   }
 }

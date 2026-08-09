@@ -1,5 +1,5 @@
 import { TimeoutError } from '../errors'
-import { assertPositiveFinite } from '../validate'
+import { assertOneOf, assertPositiveFinite } from '../validate'
 import { basePolicy, neverAbortedSignal, type Policy } from '../policy'
 import { createEmitter, withObservable, type Observable } from '../events'
 
@@ -47,6 +47,7 @@ const isAbortSurface = (error: unknown): boolean =>
 export function timeout (ms: number, options: TimeoutOptions = {}): TimeoutPolicy {
   assertPositiveFinite('timeout ms', ms)
   const mode = options.mode ?? 'cooperative'
+  assertOneOf('mode', mode, ['cooperative', 'aggressive'])
   const emitter = createEmitter<TimeoutEvents>()
 
   const base = basePolicy(async (fn, ctx) => {

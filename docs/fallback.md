@@ -118,3 +118,9 @@ the pattern above is a dozen lines.
   chain.
 - **Order matters in composition**: `fallback` must sit *outside* whatever it
   is supposed to rescue. See [composition](composition.md).
+- **The compiler does not connect the handler's type to `execute<T>()`.**
+  `fallback('DEFAULT')` composed into a pipeline executed as
+  `execute<number>` compiles clean and hands your code a string at runtime —
+  the policy contract is generic per call, while handlers are typed at the
+  factory. Keep the fallback value's shape next to the calls it rescues, and
+  let integration tests cover the pipeline's real return type.

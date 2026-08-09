@@ -27,3 +27,14 @@ export function assertNonNegative (name: string, value: number): void {
     throw new RangeError(`${name} must be a non-negative finite number, got ${value}`)
   }
 }
+
+/**
+ * Guards the string options TypeScript cannot guard for JavaScript callers:
+ * a typo in a mode or strategy must fail at construction, not silently
+ * select a different behavior.
+ */
+export function assertOneOf<T extends string> (name: string, value: T, allowed: readonly T[]): void {
+  if (!allowed.includes(value)) {
+    throw new RangeError(`${name} must be one of ${allowed.join(', ')}, got ${JSON.stringify(value)}`)
+  }
+}

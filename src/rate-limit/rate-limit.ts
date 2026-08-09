@@ -1,6 +1,6 @@
 import { RateLimitedError } from '../errors'
 import { basePolicy, type Policy } from '../policy'
-import { assertPositiveFinite, assertPositiveInt } from '../validate'
+import { assertOneOf, assertPositiveFinite, assertPositiveInt } from '../validate'
 import { createEmitter, withObservable, type Observable } from '../events'
 
 export interface RateLimitOptions {
@@ -129,11 +129,19 @@ function slidingWindow (limit: number, interval: number): Limiter {
     },
     remaining (rawNow) {
       const now = clamp(rawNow)
-      let inWindow = 0
-      for (let i = 0; i < filled; i++) {
-        if (now - (ring[(oldest + i) % limit] as number) < interval) inWindow++
+      const cutoff = now - interval
+      // The ring is logically sorted (the clamp keeps admissions monotonic),
+      // so the first entry still inside the window is found by binary search
+      // instead of an O(limit) scan — remaining() runs on every rejection,
+      // which is exactly when load peaks.
+      let lo = 0
+      let hi = filled
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1
+        if ((ring[(oldest + mid) % limit] as number) > cutoff) hi = mid
+        else lo = mid + 1
       }
-      return limit - inWindow
+      return limit - (filled - lo)
     }
   }
 }
@@ -149,6 +157,7 @@ export function rateLimit (options: RateLimitOptions): RateLimitPolicy {
   assertPositiveInt('limit', limit)
   assertPositiveFinite('interval', interval)
   const strategy = options.strategy ?? 'token-bucket'
+  assertOneOf('strategy', strategy, ['token-bucket', 'sliding-window'])
   const burst = options.burst ?? limit
   assertPositiveInt('burst', burst)
 
@@ -170,8 +179,11 @@ export function rateLimit (options: RateLimitOptions): RateLimitPolicy {
 
     const retryAfterMs = limiter.tryAcquire(Date.now())
     if (retryAfterMs !== ADMITTED) {
-      emitter.emit('reject', { stats: stats(), retryAfterMs, correlationId: ctx.correlationId })
-      throw new RateLimitedError(stats(), retryAfterMs)
+      // One snapshot for both the event and the error: stats() walks the
+      // limiter state, and the rejection path is the storm path.
+      const snapshot = stats()
+      emitter.emit('reject', { stats: snapshot, retryAfterMs, correlationId: ctx.correlationId })
+      throw new RateLimitedError(snapshot, retryAfterMs)
     }
 
     return await fn(ctx)

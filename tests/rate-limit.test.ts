@@ -10,6 +10,11 @@ describe('rateLimit() options', () => {
     assert.throws(() => rateLimit({ limit: 1.5, interval: 1_000 }), { name: 'RangeError', message: /limit/ })
     assert.throws(() => rateLimit({ limit: 10, interval: 0 }), { name: 'RangeError', message: /interval/ })
     assert.throws(() => rateLimit({ limit: 10, interval: 1_000, burst: 0 }), { name: 'RangeError', message: /burst/ })
+    // A typo would otherwise silently select the other strategy.
+    assert.throws(
+      () => rateLimit({ limit: 10, interval: 1_000, strategy: 'token_bucket' as never }),
+      { name: 'RangeError', message: /strategy/ }
+    )
   })
 })
 
@@ -151,6 +156,28 @@ describe('sliding window', () => {
     assert.equal(policy.stats().remaining, 1)
 
     t.mock.timers.tick(1_000)
+    assert.equal(policy.stats().remaining, 3)
+  })
+})
+
+describe('sliding window occupancy search', () => {
+  test('remaining stays exact after the ring wraps around', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'] })
+    t.mock.timers.setTime(1_000_000)
+    const policy = rateLimit({ limit: 3, interval: 1_000, strategy: 'sliding-window' })
+
+    // Two full laps around the ring, 500ms apart each.
+    for (let i = 0; i < 6; i++) {
+      await policy.execute(() => i)
+      t.mock.timers.tick(500)
+    }
+
+    // The ring wrapped twice and now holds t+1500, t+2000, t+2500. At
+    // t+3000 only t+2500 is strictly inside the window (t+2000 is exactly
+    // interval old, which counts as out).
+    assert.equal(policy.stats().remaining, 2)
+
+    t.mock.timers.tick(600) // t+3600: everything has left the window
     assert.equal(policy.stats().remaining, 3)
   })
 })

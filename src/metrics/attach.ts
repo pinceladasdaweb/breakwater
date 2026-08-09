@@ -47,7 +47,10 @@ export function metricsPolicy (collector: MetricsCollector, options: MetricsPoli
       report('success', started, ctx.correlationId)
       return result
     } catch (error) {
-      report('failure', started, ctx.correlationId)
+      // Cancellation is not a failure here either: a cancelled pipeline
+      // reports nothing, instead of inflating the failure series every
+      // deploy or client disconnect.
+      if (!ctx.signal.aborted) report('failure', started, ctx.correlationId)
       throw error
     }
   })

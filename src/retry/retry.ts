@@ -1,7 +1,7 @@
 import { basePolicy, type Policy } from '../policy'
 import { exponential, type Backoff } from './backoff'
 import { RetryExhaustedError, isBreakwaterError } from '../errors'
-import { assertPositiveFinite, assertPositiveInt } from '../validate'
+import { assertNonNegative, assertPositiveFinite, assertPositiveInt } from '../validate'
 import { createEmitter, withObservable, type Observable } from '../events'
 
 export interface RetryOptions {
@@ -39,6 +39,13 @@ export interface RetryPolicy extends Policy, Observable<RetryEvents> {
 const defaultRetryIf = (error: unknown): boolean =>
   !(isBreakwaterError(error) && !error.retryable)
 
+/**
+ * setTimeout's ceiling: delays past 2^31−1 ms overflow and fire after ~1ms,
+ * which would invert the largest configured backoffs into the fastest
+ * retries. Clamping keeps them at ~24.8 days — effectively "never", honestly.
+ */
+const MAX_TIMEOUT_MS = 2 ** 31 - 1
+
 /** Waits `ms`, rejecting with the signal's reason if it aborts first. */
 async function sleep (ms: number, signal: AbortSignal): Promise<void> {
   await new Promise<void>((resolve, reject) => {
@@ -57,7 +64,7 @@ async function sleep (ms: number, signal: AbortSignal): Promise<void> {
     const timer = setTimeout(() => {
       signal.removeEventListener('abort', onAbort)
       resolve()
-    }, ms)
+    }, Math.min(ms, MAX_TIMEOUT_MS))
 
     signal.addEventListener('abort', onAbort, { once: true })
   })
@@ -94,6 +101,9 @@ export function retry (options: RetryOptions = {}): RetryPolicy {
         if (attempt === attempts) break
 
         const delay = backoff(attempt)
+        // A custom backoff returning NaN or Infinity is a configuration bug;
+        // failing loudly beats a silent 1ms hot loop or an eternal sleep.
+        assertNonNegative('backoff delay', delay)
         if (deadline !== undefined && Date.now() - start + delay > deadline) {
           emitter.emit('giveUp', { attempts: attempt, error, correlationId: ctx.correlationId })
           throw new RetryExhaustedError(attempt, error)

@@ -51,7 +51,10 @@ fine and the *average* rate is what matters.
 
 Never more than `limit` executions in **any** window of `interval` ms —
 implemented as an exact sliding log over a fixed ring (O(1) admission,
-O(limit) memory). No burst allowance beyond the window:
+O(limit) memory). The window is half-open: an admission exactly `interval`
+old no longer counts, so a server doing closed-interval accounting could
+still see `limit + 1` across that single boundary instant. No burst
+allowance beyond the window:
 
 ```ts
 // A partner API cuts you off at 100 calls per minute, no forgiveness.

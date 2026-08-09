@@ -1,4 +1,4 @@
-import { assertNonNegative, assertPositiveFinite } from '../validate'
+import { assertNonNegative, assertOneOf, assertPositiveFinite } from '../validate'
 
 /**
  * A backoff strategy: given the attempt number (1-based, i.e. the number of
@@ -52,6 +52,7 @@ export function exponential (options: ExponentialBackoffOptions = {}): Backoff {
   const { initial = 100, factor = 2, max = 30_000, jitter = 'full' } = options
   assertNonNegative('initial', initial)
   assertPositiveFinite('factor', factor)
+  assertOneOf('jitter', jitter, ['none', 'full', 'equal'])
 
   return (attempt) => {
     const delay = Math.min(initial * factor ** (attempt - 1), max)
