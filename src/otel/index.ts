@@ -53,7 +53,7 @@ export interface OtelCollector extends MetricsCollector {}
 /**
  * Ready-made OpenTelemetry instruments for every breakwater signal — the
  * OTel counterpart of `breakwater/prometheus`, implementing the same
- * MetricsCollector interface with the same eight signals.
+ * MetricsCollector interface with the same nine signals.
  *
  * Attribute sets are deliberately low-cardinality: policy kinds, outcomes,
  * rejection reasons and the policy `name` — never correlation IDs or
@@ -84,6 +84,10 @@ export function otelCollector (options: OtelCollectorOptions = {}): OtelCollecto
   const fallbacks = meter.createCounter('breakwater.fallbacks', {
     description: 'Failed executions replaced by a fallback handler.',
     unit: '{fallback}'
+  })
+  const stale = meter.createCounter('breakwater.stale.rescues', {
+    description: 'Failures rescued by the staleCache policy with a cached value.',
+    unit: '{rescue}'
   })
   const rejections = meter.createCounter('breakwater.rejections', {
     description: 'Executions rejected without running: open or isolated circuit, full bulkhead or exhausted rate limit.',
@@ -130,6 +134,10 @@ export function otelCollector (options: OtelCollectorOptions = {}): OtelCollecto
 
     onFallback (event) {
       fallbacks.add(1, { 'breakwater.name': nameAttribute(event) })
+    },
+
+    onStale (event) {
+      stale.add(1, { 'breakwater.name': nameAttribute(event) })
     },
 
     onReject (event) {

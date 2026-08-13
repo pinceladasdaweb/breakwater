@@ -41,6 +41,8 @@ The full event catalog:
 | bulkhead | `reject` | `{ stats, correlationId }` |
 | rate limit | `reject` | `{ stats, retryAfterMs, correlationId }` |
 | fallback | `fallback` | `{ error, handlerIndex, correlationId }` |
+| stale cache | `stale` | `{ key, ageMs, error, correlationId }` |
+| stale cache | `miss` | `{ key, error, correlationId }` |
 
 Guarantees:
 
@@ -100,6 +102,7 @@ const collector: MetricsCollector = {
   onTimeout ({ name }) { timeoutCounter.labels(name ?? 'default').inc() },
   onStateChange ({ name, from, to }) { circuitState.labels(name ?? 'default').set(to === 'open' ? 1 : 0) },
   onFallback ({ name }) { fallbackCounter.labels(name ?? 'default').inc() },
+  onStale ({ name, ageMs }) { staleCounter.labels(name ?? 'default').inc() },
   onReject ({ name, reason }) { rejectCounter.labels(name ?? 'default', reason).inc() }
 }
 ```
@@ -120,7 +123,7 @@ const policy = resilience({
 
 Don't want to write one? [`breakwater/prometheus`](prometheus.md) is a
 ready-made implementation backed by prom-client, and
-[`breakwater/otel`](otel.md) is its OpenTelemetry counterpart — same eight
+[`breakwater/otel`](otel.md) is its OpenTelemetry counterpart — same nine
 signals, plus spans via a composable `spanPolicy()`. Either way the core
 never imports `prom-client` or OpenTelemetry itself — the adapters live
 behind their own entry points, with their client libraries as optional peer
@@ -162,7 +165,8 @@ detach()
   throws is reported and ignored — monitoring never changes an outcome.
 - What gets wired, by `kind`: `retry` → `onRetry`; `timeout` → `onTimeout`;
   `circuitBreaker` → `onStateChange` + `onReject`; `bulkhead` and
-  `rateLimit` → `onReject`; `fallback` → `onFallback`. Compositions are
+  `rateLimit` → `onReject`; `fallback` → `onFallback`; `staleCache` →
+  `onStale`. Compositions are
   recursed into; unknown kinds are skipped harmlessly — custom policies
   participate by declaring a matching `kind` and emitting those events.
 - Two footguns: attaching the same collector twice duplicates events, and a

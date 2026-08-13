@@ -12,6 +12,7 @@ import { circuitBreaker } from '../src/circuit-breaker/circuit-breaker'
 import { bulkhead } from '../src/bulkhead/bulkhead'
 import { rateLimit } from '../src/rate-limit/rate-limit'
 import { fallback } from '../src/fallback/fallback'
+import { staleCache } from '../src/stale-cache/stale-cache'
 import { drain, gated, rejectsOnAbort } from './helpers'
 
 function recordingCollector (events: string[]): MetricsCollector {
@@ -144,6 +145,17 @@ describe('attachMetrics()', () => {
     assert.equal(await pipeline.execute(() => 'ok'), 'ok')
     assert.equal(await pipeline.execute(() => { throw new Error('down') }), 'rescued')
 
+    assert.equal(reported.mock.callCount(), 0)
+  })
+
+  test('a collector that implements nothing survives a stale rescue too', async (t) => {
+    const reported = t.mock.method(console, 'error', () => {})
+    const policy = staleCache({ staleIf: () => true })
+    attachMetrics(policy, {})
+
+    assert.equal(await policy.execute(() => 'ok'), 'ok')
+    // Rescue fires the 'stale' event into a collector without onStale.
+    assert.equal(await policy.execute(() => { throw new Error('down') }), 'ok')
     assert.equal(reported.mock.callCount(), 0)
   })
 

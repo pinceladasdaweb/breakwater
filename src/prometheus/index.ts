@@ -82,6 +82,12 @@ export function prometheusCollector (options: PrometheusCollectorOptions = {}): 
     labelNames: ['name'],
     registers
   })
+  const stale = new Counter({
+    name: `${prefix}stale_rescues_total`,
+    help: 'Failures rescued by the staleCache policy with a cached value.',
+    labelNames: ['name'],
+    registers
+  })
   const rejections = new Counter({
     name: `${prefix}rejections_total`,
     help: 'Executions rejected without running: open or isolated circuit, full bulkhead or exhausted rate limit.',
@@ -124,6 +130,10 @@ export function prometheusCollector (options: PrometheusCollectorOptions = {}): 
 
     onFallback (event) {
       fallbacks.inc({ name: nameLabel(event) })
+    },
+
+    onStale (event) {
+      stale.inc({ name: nameLabel(event) })
     },
 
     onReject (event) {

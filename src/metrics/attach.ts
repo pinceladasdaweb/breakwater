@@ -143,6 +143,12 @@ export function attachMetrics (
           collector.onFallback?.({ name, handlerIndex })
         })
         break
+      case 'staleCache':
+        subscribe(observable, 'stale', (payload) => {
+          const { ageMs } = payload as { ageMs: number }
+          collector.onStale?.({ name, ageMs })
+        })
+        break
     }
   }
 

@@ -110,10 +110,12 @@ describe('event mapping', () => {
     collector.onRetry?.({ name: 'api', attempt: 2, delayMs: 20 })
     collector.onTimeout?.({ name: 'api', ms: 50 })
     collector.onFallback?.({ name: 'api', handlerIndex: 0 })
+    collector.onStale?.({ name: 'api', ageMs: 1_000 })
 
     assert.equal(await seriesValue(registry, 'breakwater_retries_total', { name: 'api' }), 2)
     assert.equal(await seriesValue(registry, 'breakwater_timeouts_total', { name: 'api' }), 1)
     assert.equal(await seriesValue(registry, 'breakwater_fallbacks_total', { name: 'api' }), 1)
+    assert.equal(await seriesValue(registry, 'breakwater_stale_rescues_total', { name: 'api' }), 1)
   })
 
   test('rejections carry the rejecting policy and the reason', async () => {

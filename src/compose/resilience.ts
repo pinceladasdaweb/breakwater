@@ -8,6 +8,7 @@ import { bulkhead, type BulkheadOptions } from '../bulkhead/bulkhead'
 import { rateLimit, type RateLimitOptions } from '../rate-limit/rate-limit'
 import { circuitBreaker, type CircuitBreakerOptions } from '../circuit-breaker/circuit-breaker'
 import { fallback as fallbackPolicy, type FallbackHandler, type FallbackOptions } from '../fallback/fallback'
+import { staleCache, type StaleCacheOptions } from '../stale-cache/stale-cache'
 
 export interface ResilienceOptions {
   /**
@@ -35,13 +36,21 @@ export interface ResilienceOptions {
   fallback?: FallbackHandler<unknown> | Array<FallbackHandler<unknown>>
   /** Options for the fallback policy (e.g. fallbackIf). */
   fallbackOptions?: FallbackOptions
+  /**
+   * Serves the last good response while the circuit is open. Sits inside
+   * the fallback (the rescue is more specific, the fallback is the last
+   * resort) and outside the retry, so a stale answer only goes out once
+   * retrying has given up. Pass `{}` for the defaults.
+   */
+  staleCache?: StaleCacheOptions
   /** Receives the pipeline's metrics without any per-policy wiring. */
   metrics?: MetricsCollector
 }
 
 /**
  * The batteries-included composition for those who do not want to pick an
- * order: fallback(retry(rateLimit(bulkhead(circuitBreaker(timeout(fn)))))).
+ * order:
+ * fallback(staleCache(retry(rateLimit(bulkhead(circuitBreaker(timeout(fn))))))).
  *
  * Retry sits outside the breaker on purpose: every attempt goes through the
  * breaker (feeding its stats individually), and once the circuit opens the
@@ -55,6 +64,7 @@ export function resilience (options: ResilienceOptions = {}): ComposedPolicy {
   const fb = options.fallback !== undefined
     ? fallbackPolicy(options.fallback, options.fallbackOptions)
     : undefined
+  const sc = options.staleCache !== undefined ? staleCache(options.staleCache) : undefined
   const rt = options.retry !== undefined ? retry(options.retry) : undefined
   const rl = options.rateLimit !== undefined ? rateLimit(options.rateLimit) : undefined
   const bh = options.bulkhead !== undefined ? bulkhead(options.bulkhead) : undefined
@@ -69,6 +79,7 @@ export function resilience (options: ResilienceOptions = {}): ComposedPolicy {
     // Same generic wiring compose() users get from attachMetrics — the only
     // extra here is honoring each guard's own metrics name.
     if (fb !== undefined) attachMetrics(fb, metrics, { name })
+    if (sc !== undefined) attachMetrics(sc, metrics, { name })
     if (rt !== undefined) attachMetrics(rt, metrics, { name })
     if (rl !== undefined) attachMetrics(rl, metrics, { name: options.rateLimit?.name ?? name })
     if (bh !== undefined) attachMetrics(bh, metrics, { name: options.bulkhead?.name ?? name })
@@ -78,9 +89,9 @@ export function resilience (options: ResilienceOptions = {}): ComposedPolicy {
 
   // Assembly order is the documented default, with the pipeline-level
   // execution meter outermost when metrics are wired:
-  // metrics(fallback(retry(rateLimit(bulkhead(breaker(timeout(fn))))))).
+  // metrics(fallback(staleCache(retry(rateLimit(bulkhead(breaker(timeout(fn)))))))).
   const mp = metrics !== undefined ? metricsPolicy(metrics, { name, label: 'resilience' }) : undefined
-  const slots: Array<Policy | undefined> = [mp, fb, rt, rl, bh, cb, to]
+  const slots: Array<Policy | undefined> = [mp, fb, sc, rt, rl, bh, cb, to]
   const policies = slots.filter((p): p is Policy => p !== undefined)
 
   if (policies.length === 0) {

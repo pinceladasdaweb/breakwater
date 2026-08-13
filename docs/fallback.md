@@ -76,37 +76,17 @@ const policy = fallback(DEFAULT, {
 A chain that succeeds on the second handler emits the event twice
 (`handlerIndex: 0`, then `1`) — you can see exactly how degraded you are.
 
-## Real-world example: stale-while-open
+## Serving stale data instead: `staleCache`
 
 The classic pairing with the circuit breaker — serve the last known good
-response while the dependency is down:
-
-```ts
-import { compose, fallback, circuitBreaker, isCircuitOpenError } from 'breakwater'
-
-const lastGood = new Map<string, unknown>()
-
-const policy = compose(
-  fallback((error, ctx) => {
-    const stale = lastGood.get(String(ctx.metadata.key))
-    if (stale === undefined) throw error // nothing cached: fail honestly
-    return { ...stale, stale: true }
-  }, { fallbackIf: isCircuitOpenError }), // only when the circuit is open
-  circuitBreaker({ name: 'catalog' })
-)
-
-export async function getCatalog (key: string): Promise<unknown> {
-  const result = await policy.execute(
-    async () => await catalogApi.get(key),
-    { metadata: { key } }
-  )
-  if (result !== undefined && !(result as { stale?: boolean }).stale) lastGood.set(key, result)
-  return result
-}
-```
-
-A built-in stale-response cache (with pluggable storage) is planned — today
-the pattern above is a dozen lines.
+response while the dependency is down — used to be a hand-rolled fallback
+handler. It is a built-in policy now:
+[`staleCache()`](stale-cache.md), with pluggable storage, keyed entries and
+its own metrics. Reach for a fallback when the replacement is *computed* (a
+default value, a secondary provider); reach for the stale cache when the
+replacement is *whatever the last success returned*. They compose —
+`fallback(staleCache(...))` — so the fallback catches what the cache cannot
+rescue, like a cold start with nothing cached yet.
 
 ## Gotchas
 

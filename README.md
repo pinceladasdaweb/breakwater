@@ -45,6 +45,7 @@ const charge = await payments.execute(({ signal }) => api.post('/charge', body, 
 | Timeout / fallback | ✅ | ➖ fallback only | ✅ |
 | Bulkhead | ✅ | ❌ | ✅ |
 | Rate limiter (token bucket / sliding window) | ✅ | ❌ | ❌ |
+| Stale-while-open cache (last good response) | ✅ [`staleCache`](docs/stale-cache.md) | ❌ | ❌ |
 | Policy composition with explicit ordering | ✅ first-class | ❌ | ✅ |
 | Named policy registry (central config) | ✅ | ❌ | ❌ |
 | Typed events + pluggable metrics collector | ✅ native | ➖ via plugin | ❌ |
@@ -177,6 +178,7 @@ The abort reason propagates to the caller untouched.
 | [`bulkhead(options?)`](docs/bulkhead.md) | Bound concurrent executions, with an optional FIFO wait queue | [docs/bulkhead.md](docs/bulkhead.md) |
 | [`rateLimit(options)`](docs/rate-limit.md) | Cap the execution rate — token bucket or exact sliding window | [docs/rate-limit.md](docs/rate-limit.md) |
 | [`fallback(handler, options?)`](docs/fallback.md) | Replace a failure with a value, a function result, or a chain of them | [docs/fallback.md](docs/fallback.md) |
+| [`staleCache(options?)`](docs/stale-cache.md) | Serve the last good response while the circuit is open | [docs/stale-cache.md](docs/stale-cache.md) |
 | [`compose(...policies)`](docs/composition.md) | Combine policies with explicit ordering; compositions compose again | [docs/composition.md](docs/composition.md) |
 | [`resilience(options)`](docs/composition.md#resilience-the-batteries-included-order) | The batteries-included pipeline with a sane default order | [docs/composition.md](docs/composition.md) |
 
@@ -315,6 +317,7 @@ See [docs/errors.md](docs/errors.md).
 - [Bulkhead](docs/bulkhead.md)
 - [Rate limit](docs/rate-limit.md)
 - [Fallback](docs/fallback.md)
+- [Stale cache (stale-while-open)](docs/stale-cache.md)
 - [Composition & ordering](docs/composition.md) — read this one; ordering is where resilience goes right or wrong
 - [Named policies](docs/named-policies.md)
 - [Observability: events, stats & metrics](docs/observability.md)
