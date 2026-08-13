@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## 0.10.0 (2026-08-13)
+
+* feat: add staleCache policy — serve the last good response while the circuit is open by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/3b41f0d48f5062f451f06cac98c283e30f7d8e87)
+
+
 ## 0.9.0 (2026-08-09)
 
 * feat: add OpenTelemetry adapter with spans and metrics under breakwater/otel by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/9b7cc839362ae631d1934bdafd3d785cf797033d)
