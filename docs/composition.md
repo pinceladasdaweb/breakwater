@@ -157,6 +157,7 @@ const policy = resilience({
   circuitBreaker: { name: 'payments-api', failureThreshold: 0.5 },
   timeout: 2_000,                      // number = shortcut for { ms: 2000 }
   fallback: () => ({ queued: true }),  // single handler or a chain
+  staleCache: {},                      // serve the last good response while open
   metrics: collector                   // optional: wires every policy at once
 })
 ```
@@ -164,7 +165,7 @@ const policy = resilience({
 Fixed, documented order — exactly Option A with fallback outside:
 
 ```
-fallback( retry( rateLimit( bulkhead( circuitBreaker( timeout( fn ) ) ) ) ) )
+fallback( staleCache( retry( rateLimit( bulkhead( circuitBreaker( timeout( fn ) ) ) ) ) ) )
 ```
 
 The local guards sit outside the breaker on purpose: neither a full
@@ -175,7 +176,10 @@ burst. The rate limit comes first because its check is the cheapest.
 
 Every option is optional; omitted policies simply drop out of the chain.
 `timeout` accepts `{ ms, mode }` for the aggressive mode, and
-`fallbackOptions` carries `fallbackIf`. (When `metrics` is set, a
+`fallbackOptions` carries `fallbackIf`. The [stale cache](stale-cache.md)
+sits inside the fallback (the rescue is more specific, the fallback is the
+last resort) and outside the retry, so a stale answer only goes out once
+retrying has given up. (When `metrics` is set, a
 [`metricsPolicy`](observability.md#manual-pipelines-attachmetrics-and-metricspolicy)
 is composed outermost to measure the whole pipeline.) Need a different
 order? Use `compose()` — that is why it exists.

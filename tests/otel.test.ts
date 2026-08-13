@@ -96,10 +96,12 @@ describe('otelCollector() event mapping', () => {
     collector.onRetry?.({ name: 'api', attempt: 2, delayMs: 20 })
     collector.onTimeout?.({ name: 'api', ms: 50 })
     collector.onFallback?.({ name: 'api', handlerIndex: 0 })
+    collector.onStale?.({ name: 'api', ageMs: 1_000 })
 
     assert.equal(await pointValue(reader, 'breakwater.retries', { 'breakwater.name': 'api' }), 2)
     assert.equal(await pointValue(reader, 'breakwater.timeouts', { 'breakwater.name': 'api' }), 1)
     assert.equal(await pointValue(reader, 'breakwater.fallbacks', { 'breakwater.name': 'api' }), 1)
+    assert.equal(await pointValue(reader, 'breakwater.stale.rescues', { 'breakwater.name': 'api' }), 1)
   })
 
   test('rejections carry the rejecting policy and the reason', async () => {
@@ -165,6 +167,7 @@ describe('otelCollector() event mapping', () => {
     collector.onRetry?.({ name: 'api', attempt: 1, delayMs: 0 })
     collector.onTimeout?.({ name: 'api', ms: 50 })
     collector.onFallback?.({ name: 'api', handlerIndex: 0 })
+    collector.onStale?.({ name: 'api', ageMs: 1_000 })
     collector.onReject?.({ policy: 'bulkhead', name: 'api', reason: 'bulkhead_full' })
     collector.onStateChange?.({ name: 'api', from: 'closed', to: 'open' })
 
@@ -179,6 +182,7 @@ describe('otelCollector() event mapping', () => {
       'breakwater.retries': '{retry}',
       'breakwater.timeouts': '{timeout}',
       'breakwater.fallbacks': '{fallback}',
+      'breakwater.stale.rescues': '{rescue}',
       'breakwater.rejections': '{rejection}',
       'breakwater.circuit.state': '',
       'breakwater.circuit.transitions': '{transition}'

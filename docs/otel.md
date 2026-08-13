@@ -5,7 +5,7 @@ and adds the one thing a metrics interface cannot express: **spans**. It ships
 two pieces:
 
 - `otelCollector()` — a [`MetricsCollector`](observability.md) emitting the
-  same eight signals as [`breakwater/prometheus`](prometheus.md), as OTel
+  same nine signals as [`breakwater/prometheus`](prometheus.md), as OTel
   instruments.
 - `spanPolicy()` — a composable policy that wraps each execution in an active
   span, so whatever your function calls (an instrumented `fetch`, a database
@@ -23,9 +23,9 @@ brings its own SDK (`@opentelemetry/sdk-node` or the individual SDK packages)
 ## Quick start
 
 ```ts
-import { NodeSDK } from '@opentelemetry/sdk-node'
 import { resilience } from 'breakwater'
 import { otelCollector } from 'breakwater/otel'
+import { NodeSDK } from '@opentelemetry/sdk-node'
 
 // 1. Start your SDK first — see the initialization-order note below.
 const sdk = new NodeSDK({ /* your exporters */ })
@@ -90,6 +90,7 @@ Attributes are namespaced per OTel conventions (`breakwater.name`,
 | `breakwater.retries` | counter | `name` | each scheduled retry |
 | `breakwater.timeouts` | counter | `name` | executions aborted by the timeout policy |
 | `breakwater.fallbacks` | counter | `name` | failures replaced by a fallback handler |
+| `breakwater.stale.rescues` | counter | `name` | failures rescued by the staleCache policy with a cached value |
 | `breakwater.rejections` | counter | `policy`, `name`, `reason` | fast rejections: `circuit_open`, `isolated`, `bulkhead_full`, `rate_limited` |
 | `breakwater.circuit.state` | gauge | `name`, `state` | enum pattern: the current state's series is 1, the other three are 0 |
 | `breakwater.circuit.transitions` | counter | `name`, `from`, `to` | every breaker state change |

@@ -21,5 +21,7 @@ export interface MetricsCollector {
   onTimeout?: (event: { name?: string, ms: number }) => void
   onStateChange?: (event: { name?: string, from: string, to: string }) => void
   onFallback?: (event: { name?: string, handlerIndex: number }) => void
+  /** A failure rescued by the staleCache policy with a cached value. */
+  onStale?: (event: { name?: string, ageMs: number }) => void
   onReject?: (event: { policy: string, name?: string, reason: 'circuit_open' | 'isolated' | 'bulkhead_full' | 'rate_limited' }) => void
 }

@@ -55,6 +55,12 @@ export type { RateLimitOptions, RateLimitEvents, RateLimitPolicy, RateLimitStats
 export { fallback } from './fallback/fallback'
 export type { FallbackHandler, FallbackOptions, FallbackEvents, FallbackPolicy } from './fallback/fallback'
 
+export { staleCache } from './stale-cache/stale-cache'
+export type { StaleCacheOptions, StaleCacheEvents, StaleCachePolicy } from './stale-cache/stale-cache'
+
+export { memoryCache } from './stale-cache/cache-store'
+export type { CacheStore, CacheEntry, CacheSetHints, MemoryCacheOptions } from './stale-cache/cache-store'
+
 export { compose } from './compose/compose'
 export type { ComposedPolicy, ComposedStatsEntry } from './compose/compose'
 

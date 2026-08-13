@@ -69,6 +69,7 @@ an invalid one throws at construction, not on the first scrape.
 | `breakwater_retries_total` | counter | `name` | each scheduled retry |
 | `breakwater_timeouts_total` | counter | `name` | executions aborted by the timeout policy |
 | `breakwater_fallbacks_total` | counter | `name` | failures replaced by a fallback handler |
+| `breakwater_stale_rescues_total` | counter | `name` | failures rescued by the staleCache policy with a cached value |
 | `breakwater_rejections_total` | counter | `policy`, `name`, `reason` | fast rejections: `circuit_open`, `isolated`, `bulkhead_full`, `rate_limited` |
 | `breakwater_circuit_state` | gauge | `name`, `state` | enum pattern: the current state's series is 1, the other three are 0 |
 | `breakwater_circuit_transitions_total` | counter | `name`, `from`, `to` | every breaker state change |
@@ -112,7 +113,7 @@ breakwater_circuit_state{state="open"} == 1
 
 ## Grafana
 
-A ready-to-import dashboard covering all eight metrics lives at
+A ready-to-import dashboard covering the core metrics lives at
 [`examples/grafana/breakwater-dashboard.json`](../examples/grafana/breakwater-dashboard.json):
 circuit states, execution and failure rates, p50/p95 latency, rejections by
 reason and retry/fallback activity, all split by policy `name`.
@@ -130,5 +131,5 @@ accepts one accepts it: `resilience({ metrics })`, `attachMetrics()` for
 hand-built [`compose()`](composition.md) pipelines, or side by side with a
 custom collector of your own.
 
-OTel-native stack instead? [`breakwater/otel`](otel.md) emits the same eight
+OTel-native stack instead? [`breakwater/otel`](otel.md) emits the same nine
 signals as OpenTelemetry instruments — and adds spans.
