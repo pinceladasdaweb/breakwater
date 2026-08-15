@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 1.0.0 (2026-08-15)
+
+* feat!: distributed circuit breaker via Redis, on a fenced store contract by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/b8f4bbc61df0e064196b30ddd7df23ede465a6e9)
+* fix: keep the redis command timer referenced by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/6cb877f0a32231eee0d59647d1ce96dfb2ca2b29)
+* fix: scope the integration gate to the workflow that supplies Redis by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/3b9b3619e12a4dd7aee83d400941f45f05845697)
+
+
 ## 0.10.0 (2026-08-13)
 
 * feat: add staleCache policy — serve the last good response while the circuit is open by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/3b41f0d48f5062f451f06cac98c283e30f7d8e87)
