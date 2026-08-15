@@ -169,6 +169,13 @@ Three limits worth knowing before you rely on this in an incident:
   sweep uses the window of whoever is asking, so a peer configured with a
   shorter one will discard buckets the others were still counting. Change it
   fleet-wide, not per rollout.
+- **Write access to Redis is control of the circuit.** Whoever can write
+  these keys can hold a dependency open for the whole fleet, or force it
+  closed while it is failing — and can announce a transition on the channel
+  that never happened. Replies are validated, so a malformed one is refused
+  rather than believed, and a forged push is corrected by the next read; none
+  of that substitutes for the obvious. Require auth, keep the instance off
+  public networks, and treat it as the shared control plane it is.
 
 ## Sharing the rate limit too
 
