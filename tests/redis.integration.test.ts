@@ -19,11 +19,12 @@ import { fromIoredis, redisStore } from '../src/redis/index'
  */
 const REDIS_URL = process.env.REDIS_URL
 
-// Skipping keeps the suite hermetic for anyone without a Redis around. Under
-// CI it would keep something worse: a service container that never came up
-// would report a green build with none of this verified, so there the absence
-// of REDIS_URL is a failure rather than a skip.
-const skip = REDIS_URL !== undefined || process.env.CI !== undefined
+// Skipping keeps the suite hermetic for anyone without a Redis around — and
+// for any workflow that does not provide one. Where a workflow DOES provide
+// it, REDIS_REQUIRED says so, and then a missing REDIS_URL is a failure
+// rather than a skip: a service container that never came up must not report
+// a green build with none of this verified.
+const skip = REDIS_URL !== undefined || process.env.REDIS_REQUIRED !== undefined
   ? false
   : 'REDIS_URL is not set'
 
