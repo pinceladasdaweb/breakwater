@@ -202,9 +202,13 @@ export function redisStore (options: RedisStoreOptions): RedisStore {
     try {
       return await Promise.race([
         command,
+        // Deliberately NOT unref'd: this timer is the only thing keeping the
+        // caller's promise alive while a silent backend is being waited on,
+        // and an idle process would otherwise drain the loop and leave that
+        // caller hanging — the exact failure the bound exists to prevent.
+        // The finally below always clears it, so it outlives nothing.
         new Promise((_resolve, reject) => {
           timer = setTimeout(() => reject(new Error(`redis command exceeded ${commandTimeoutMs}ms`)), commandTimeoutMs)
-          timer.unref?.()
         })
       ])
     } finally {
