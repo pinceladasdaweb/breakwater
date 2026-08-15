@@ -65,6 +65,10 @@ jobs:
         run: node --import tsx --test --test-timeout=20000 'tests/**/*.integration.test.ts'
         env:
           REDIS_URL: redis://127.0.0.1:6379
+          # Declares that this job supplies a Redis, so the suite refuses to
+          # skip: a container that failed to come up fails the build instead
+          # of passing quietly.
+          REDIS_REQUIRED: '1'
 
       - name: Build
         run: npm run build
