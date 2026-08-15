@@ -10,9 +10,14 @@ const external = (id) => !id.startsWith('.') && !id.startsWith('/')
 // copy: identity-sensitive values in the core (the never-aborted signal
 // sentinel) have to stay singletons across entry points. Types are not
 // affected — the dts bundles keep inlining, interfaces have no identity.
-const CORE_SPECIFIER = '../policy'
+// Core modules a subpath may use at RUNTIME. Each one is re-exported by the
+// core entry, so the bundle imports it from there instead of carrying a
+// private copy — identity-sensitive values stay singletons, and the shipped
+// code is not the same module twice.
+const CORE_MODULES = ['policy', 'circuit-breaker/state-store', 'circuit-breaker/window']
+const isCore = (id) => CORE_MODULES.some((module) => id === `../${module}` || id.endsWith(`/${module}`))
 const corePaths = (format) => (id) =>
-  id.endsWith('/policy') || id === CORE_SPECIFIER ? (format === 'es' ? './index.mjs' : './index.cjs') : id
+  isCore(id) ? (format === 'es' ? './index.mjs' : './index.cjs') : id
 
 // One pair of configs per public entry point. Each subpath bundles its own
 // tree — entry points stay independent, so importing breakwater/prometheus
@@ -26,7 +31,7 @@ const entry = (input, name, { core = false } = {}) => [
       { file: `dist/${name}.mjs`, format: 'es', exports: 'named', ...(core && { paths: corePaths('es') }) }
     ],
     plugins: [typescript({ include: ['src/**/*.ts'] })],
-    external: core ? (id) => external(id) || id === CORE_SPECIFIER : external
+    external: core ? (id) => external(id) || isCore(id) : external
   },
   {
     input,
@@ -45,5 +50,6 @@ const entry = (input, name, { core = false } = {}) => [
 export default [
   ...entry('src/index.ts', 'index'),
   ...entry('src/prometheus/index.ts', 'prometheus'),
-  ...entry('src/otel/index.ts', 'otel', { core: true })
+  ...entry('src/otel/index.ts', 'otel', { core: true }),
+  ...entry('src/redis/index.ts', 'redis', { core: true })
 ]

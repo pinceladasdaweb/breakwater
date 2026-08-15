@@ -204,12 +204,12 @@ describe('memoryStore lifecycle and clock', () => {
   test('delete drops everything stored under a name', async () => {
     const store = memoryStore({ window: countWindow(4) })
     store.recordFailure('b', 10)
-    store.transition('b', 'closed', 'open')
+    store.compareAndSet('b', 'closed', 'open', 0)
 
     store.delete?.('b')
 
     // The name starts over: closed, empty counters, empty latency.
-    assert.equal(store.getState('b'), 'closed')
+    assert.equal(store.readState('b').state, 'closed')
     assert.equal((await store.getCounters('b')).totalCalls, 0)
     assert.equal(latencyOf(store, 'b').count, 0)
   })
@@ -235,11 +235,69 @@ describe('memoryStore lifecycle and clock', () => {
 })
 
 describe('memoryStore state transitions', () => {
-  test('transition is compare-and-set', () => {
+  test('compareAndSet swaps only from the expected state', () => {
     const store = memoryStore()
-    assert.equal(store.getState('b'), 'closed')
-    assert.equal(store.transition('b', 'closed', 'open'), true)
-    assert.equal(store.transition('b', 'closed', 'open'), false)
-    assert.equal(store.getState('b'), 'open')
+    assert.equal(store.readState('b').state, 'closed')
+    assert.equal(store.compareAndSet('b', 'closed', 'open', 0).ok, true)
+    // The state moved on: the same swap no longer applies.
+    assert.equal(store.compareAndSet('b', 'closed', 'open', 1).ok, false)
+    assert.equal(store.readState('b').state, 'open')
+  })
+
+  test('compareAndSet refuses a swap carrying a stale fence', () => {
+    const store = memoryStore()
+    const stale = store.readState('b').fence
+
+    assert.equal(store.compareAndSet('b', 'closed', 'open', stale).ok, true)
+    assert.equal(store.compareAndSet('b', 'open', 'half-open', stale + 1).ok, true)
+    // Back to a state this caller's fence once matched — the ABA case a
+    // fence exists for: the state name lines up, the period does not.
+    assert.equal(store.compareAndSet('b', 'half-open', 'open', stale + 2).ok, true)
+    assert.equal(store.compareAndSet('b', 'open', 'closed', stale).ok, false)
+    assert.equal(store.readState('b').state, 'open')
+  })
+
+  test('every successful swap mints a new fence, and the period timing follows the state', () => {
+    const store = memoryStore()
+    const first = store.readState('b')
+    assert.equal(first.openedAt, undefined)
+
+    const opened = store.compareAndSet('b', 'closed', 'open', first.fence)
+    assert.notEqual(opened.snapshot.fence, first.fence)
+    assert.equal(typeof opened.snapshot.openedAt, 'number')
+
+    // half-open belongs to the same open period: the timing carries over.
+    const probing = store.compareAndSet('b', 'open', 'half-open', opened.snapshot.fence)
+    assert.equal(probing.snapshot.openedAt, opened.snapshot.openedAt)
+
+    // Closing leaves the period behind entirely.
+    const closed = store.compareAndSet('b', 'half-open', 'closed', probing.snapshot.fence)
+    assert.equal(closed.snapshot.openedAt, undefined)
+  })
+
+  test('a deleted name never gets a fence it already used', () => {
+    const store = memoryStore()
+
+    store.compareAndSet('b', 'closed', 'open', store.readState('b').fence)
+    store.compareAndSet('b', 'open', 'half-open', store.readState('b').fence)
+    const before = store.readState('b').fence
+
+    store.delete?.('b')
+
+    // Restarting the count would let a swap still in flight across the delete
+    // land on a period several generations later — the very ambiguity the
+    // fence exists to remove.
+    assert.ok(store.readState('b').fence >= before, 'fences must never rewind')
+    assert.equal(store.compareAndSet('b', 'closed', 'open', 0).ok, false)
+  })
+
+  test('a lost swap reports where the circuit actually is', () => {
+    const store = memoryStore()
+    const start = store.readState('b')
+    store.compareAndSet('b', 'closed', 'open', start.fence)
+
+    const lost = store.compareAndSet('b', 'closed', 'open', start.fence)
+    assert.equal(lost.ok, false)
+    assert.equal(lost.snapshot.state, 'open')
   })
 })

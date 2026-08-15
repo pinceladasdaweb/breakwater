@@ -18,6 +18,19 @@ jobs:
       fail-fast: false
       matrix:
         node: [22, 24, 26]
+    # The Redis store's Lua is the kind of code a fake cannot vouch for: the
+    # atomicity of the fenced swap, the server clock every instance shares
+    # and the probe election only mean something against a real server.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v7
 
@@ -43,6 +56,15 @@ jobs:
 
       - name: Unit tests (with coverage)
         run: npm run test:coverage
+
+      # Gated on the variable, exactly as in the sibling libraries: the suite
+      # stays hermetic for anyone running it without a Redis around. Under CI
+      # the gate inverts — a missing REDIS_URL fails instead of skipping, so a
+      # broken service container cannot pass as a green build with no coverage.
+      - name: Integration tests (real Redis)
+        run: node --import tsx --test --test-timeout=20000 'tests/**/*.integration.test.ts'
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
 
       - name: Build
         run: npm run build

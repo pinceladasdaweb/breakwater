@@ -2,7 +2,7 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { circuitBreaker } from '../src/circuit-breaker/circuit-breaker'
-import { memoryStore, type LatencyStats, type StateStore } from '../src/circuit-breaker/state-store'
+import { memoryStore, type LatencyStats, type StateSnapshot, type StateStore } from '../src/circuit-breaker/state-store'
 import { countWindow, timeWindow } from '../src/circuit-breaker/window'
 import { isCircuitOpenError, isIsolatedError } from '../src/errors'
 
@@ -14,8 +14,8 @@ const boom = (): never => { throw new Error('downstream failure') }
 function asyncStore (): StateStore {
   const inner = memoryStore({ window: countWindow(10) })
   return {
-    getState: async (name) => inner.getState(name),
-    transition: async (name, from, to) => inner.transition(name, from, to),
+    readState: async (name) => inner.readState(name),
+    compareAndSet: async (name, from, to, fence) => inner.compareAndSet(name, from, to, fence),
     recordSuccess: async (name, ms) => { inner.recordSuccess(name, ms) },
     recordFailure: async (name, ms) => { inner.recordFailure(name, ms) },
     getCounters: async (name) => inner.getCounters(name),
@@ -175,6 +175,9 @@ describe('half-open', () => {
     // majority = floor(3/2) + 1 = 2 successes
     await breaker.execute(() => 'probe 1')
     assert.equal(breaker.state, 'half-open')
+    // Probing belongs to the same open period, so the moment the outage
+    // started is still on display while it runs.
+    assert.equal(typeof breaker.stats().openedAt, 'number')
     await breaker.execute(() => 'probe 2')
     assert.equal(breaker.state, 'closed')
 
@@ -616,11 +619,13 @@ describe('shared state store', () => {
   test('losing the trip race adopts the peer state instead of announcing our own', async () => {
     const inner = memoryStore({ window: countWindow(10) })
     let lostTheRace = false
-    // Another instance tripped the shared circuit microseconds earlier.
+    // Another instance tripped the shared circuit microseconds earlier, so
+    // our swap loses and the store hands back the period the peer minted.
+    const peerPeriod = { state: 'open' as const, fence: 9 }
     const store: StateStore = {
       ...inner,
-      getState: () => lostTheRace ? 'open' : 'closed',
-      transition: () => { lostTheRace = true; return false }
+      readState: () => lostTheRace ? peerPeriod : { state: 'closed', fence: 0 },
+      compareAndSet: () => { lostTheRace = true; return { ok: false, snapshot: peerPeriod } }
     }
     const breaker = circuitBreaker({ consecutiveFailures: 1, name: 'shared', stateStore: store })
     const changes: string[] = []
@@ -631,6 +636,250 @@ describe('shared state store', () => {
     assert.equal(breaker.state, 'open')
     assert.deepEqual(changes, []) // the transition was the peer's to announce
     assert.equal(breaker.stats().openedAt, undefined)
+  })
+
+  test('a store missing the fenced pair is refused at construction, not mid-request', () => {
+    // The shape a store written against the previous contract would have.
+    const legacy = {
+      getState: () => 'closed',
+      transition: () => true,
+      recordSuccess: () => {},
+      recordFailure: () => {},
+      getCounters: () => ({ successes: 0, failures: 0, totalCalls: 0, failureRate: 0 }),
+      resetCounters: () => {},
+      acquireProbe: () => true
+    } as unknown as StateStore
+
+    assert.throws(
+      () => circuitBreaker({ name: 'legacy', stateStore: legacy }),
+      { name: 'TypeError', message: /readState and compareAndSet/ }
+    )
+
+    // Half-migrated counts as missing: either method alone is refused.
+    const complete = memoryStore()
+    const withoutRead = { ...complete, readState: undefined } as unknown as StateStore
+    const withoutCas = { ...complete, compareAndSet: undefined } as unknown as StateStore
+
+    assert.throws(() => circuitBreaker({ name: 'half-a', stateStore: withoutRead }), { name: 'TypeError' })
+    assert.throws(() => circuitBreaker({ name: 'half-b', stateStore: withoutCas }), { name: 'TypeError' })
+    assert.doesNotThrow(() => circuitBreaker({ name: 'complete', stateStore: complete }))
+  })
+
+  test('the period timing comes from the store, so peers agree on the probe moment', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    t.mock.timers.setTime(1_000_000)
+    const store = memoryStore({ window: countWindow(10) })
+    const first = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1_000, name: 'shared', stateStore: store })
+    const second = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1_000, name: 'shared', stateStore: store })
+
+    // The first instance trips the shared circuit...
+    await failTimes(first, 1)
+    const openedAt = first.stats().openedAt
+    assert.equal(openedAt, 1_000_000)
+
+    // ...and the second one, which never saw the trip, inherits the very
+    // same period instead of starting its own cooldown on first sight.
+    t.mock.timers.tick(600)
+    await assert.rejects(second.execute(() => 'x'), isCircuitOpenError)
+    assert.equal(second.stats().openedAt, openedAt)
+    assert.equal(second.stats().nextAttemptAt, 1_001_000)
+
+    // The cooldown elapses once for both: no instance probes early, and
+    // none waits an extra full window because it observed the circuit late.
+    t.mock.timers.tick(400)
+    assert.equal(await second.execute(() => 'probe'), 'probe')
+  })
+
+  test('a store without period timing keeps each cooldown counted from first sight', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    t.mock.timers.setTime(1_000_000)
+    const inner = memoryStore({ window: countWindow(10) })
+    // Shares the state but not the timing — the case where each instance
+    // has to count the cooldown for itself.
+    const timeless = (snapshot: StateSnapshot): StateSnapshot => ({ state: snapshot.state, fence: snapshot.fence })
+    const store: StateStore = {
+      ...inner,
+      readState: (name) => timeless(inner.readState(name)),
+      compareAndSet: (name, from, to, fence) => {
+        const outcome = inner.compareAndSet(name, from, to, fence)
+        return { ok: outcome.ok, snapshot: timeless(outcome.snapshot) }
+      }
+    }
+    const breaker = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1_000, halfOpenCalls: 1, name: 'timeless', stateStore: store })
+
+    await failTimes(breaker, 1)
+    await assert.rejects(breaker.execute(() => 'x'), isCircuitOpenError)
+    assert.equal(breaker.stats().openedAt, 1_000_000)
+
+    // Every later read must leave that moment alone: re-stamping it on each
+    // observation would push the probe forever out of reach.
+    t.mock.timers.tick(600)
+    await assert.rejects(breaker.execute(() => 'x'), isCircuitOpenError)
+    assert.equal(breaker.stats().openedAt, 1_000_000)
+
+    t.mock.timers.tick(400)
+    assert.equal(await breaker.execute(() => 'probe'), 'probe')
+    assert.equal(breaker.state, 'closed')
+
+    // A second outage is a NEW period: the timing of the previous one must
+    // have been dropped, or its long-expired countdown would admit a probe
+    // the instant the circuit reopens.
+    await failTimes(breaker, 1)
+    await assert.rejects(breaker.execute(() => 'x'), isCircuitOpenError)
+    t.mock.timers.tick(999)
+    await assert.rejects(breaker.execute(() => 'x'), isCircuitOpenError)
+    t.mock.timers.tick(1)
+    assert.equal(await breaker.execute(() => 'probe 2'), 'probe 2')
+  })
+
+  test('a success from a dead period never counts towards the fresh period majority', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const inner = memoryStore({ window: countWindow(10) })
+    let holdSuccess: Promise<void> | undefined
+    const store: StateStore = {
+      ...inner,
+      async recordSuccess (name, ms) {
+        if (holdSuccess !== undefined) {
+          const held = holdSuccess
+          holdSuccess = undefined
+          await held
+        }
+        inner.recordSuccess(name, ms)
+      }
+    }
+    // Five probe slots, so a majority is three successes — enough room for
+    // a ghost success to close the circuit early if it were ever counted.
+    const breaker = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1_000, halfOpenCalls: 5, name: 'stale-success', stateStore: store })
+
+    await failTimes(breaker, 1)
+    t.mock.timers.tick(1_000)
+
+    // Period 1: a probe succeeds but its bookkeeping stalls in flight...
+    const { promise: held, resolve: release } = Promise.withResolvers<void>()
+    holdSuccess = held
+    const stalled = breaker.execute(() => 'probe 1')
+    await drain()
+
+    // ...period 1 dies to a failing probe, and period 2 opens fresh.
+    await assert.rejects(breaker.execute(boom), /downstream failure/)
+    t.mock.timers.tick(1_000)
+    assert.equal(await breaker.execute(() => 'fresh probe 1'), 'fresh probe 1')
+    assert.equal(breaker.state, 'half-open')
+
+    // The stale success lands now, and counting it would hand period 2 a
+    // majority it never earned.
+    release()
+    assert.equal(await stalled, 'probe 1')
+    assert.equal(breaker.state, 'half-open')
+
+    // Two real successes are still one short of the majority: a circuit
+    // that closes here is one counting a period that no longer exists.
+    assert.equal(await breaker.execute(() => 'fresh probe 2'), 'fresh probe 2')
+    assert.equal(breaker.state, 'half-open')
+
+    // Period 2 closes on its own third success, not on the ghost of one.
+    assert.equal(await breaker.execute(() => 'fresh probe 3'), 'fresh probe 3')
+    assert.equal(breaker.state, 'closed')
+  })
+
+  test('a store without period timing still starts a fresh cooldown when a probe reopens it', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    t.mock.timers.setTime(1_000_000)
+    const inner = memoryStore({ window: countWindow(10) })
+    const timeless = (snapshot: StateSnapshot): StateSnapshot => ({ state: snapshot.state, fence: snapshot.fence })
+    const store: StateStore = {
+      ...inner,
+      readState: (name) => timeless(inner.readState(name)),
+      compareAndSet: (name, from, to, fence) => {
+        const outcome = inner.compareAndSet(name, from, to, fence)
+        return { ok: outcome.ok, snapshot: timeless(outcome.snapshot) }
+      }
+    }
+    const breaker = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 500, halfOpenCalls: 1, name: 'timeless-reopen', stateStore: store })
+
+    await failTimes(breaker, 1)
+    await assert.rejects(breaker.execute(() => 'x'), isCircuitOpenError) // stamps first sight
+    t.mock.timers.tick(500)
+
+    // The probe fails, so the circuit reopens: a NEW period, which must get a
+    // new cooldown. Inheriting the previous period's stamp would leave
+    // nextAttemptAt in the past and admit every later call as a probe — the
+    // breaker would stop protecting anything, permanently.
+    await assert.rejects(breaker.execute(boom), /downstream failure/)
+    assert.equal(breaker.state, 'open')
+
+    let ran = 0
+    for (let i = 0; i < 3; i++) {
+      await breaker.execute(() => { ran++; return 'x' }).catch(() => {})
+    }
+    assert.equal(ran, 0, 'the fresh open period must hold its own cooldown')
+
+    t.mock.timers.tick(500)
+    assert.equal(await breaker.execute(() => 'probe'), 'probe')
+  })
+
+  test('a state read that lands late never rewinds the mirror a newer one set', async () => {
+    const inner = memoryStore({ window: countWindow(10) })
+    let hold: Promise<void> | undefined
+    const store: StateStore = {
+      ...inner,
+      async readState (name) {
+        if (hold !== undefined) {
+          const held = hold
+          hold = undefined
+          await held
+        }
+        return inner.readState(name)
+      },
+      compareAndSet: async (name, from, to, fence) => inner.compareAndSet(name, from, to, fence),
+      recordSuccess: async (name, ms) => { inner.recordSuccess(name, ms) },
+      recordFailure: async (name, ms) => { inner.recordFailure(name, ms) },
+      getCounters: async (name) => inner.getCounters(name),
+      resetCounters: async (name) => { inner.resetCounters(name) },
+      acquireProbe: async () => true
+    }
+    const breaker = circuitBreaker({ consecutiveFailures: 1, halfOpenCalls: 2, name: 'out-of-order', stateStore: store })
+
+    // A read starts and stalls; the circuit moves on while it is in flight.
+    const { promise: held, resolve: release } = Promise.withResolvers<void>()
+    hold = held
+    const stalled = breaker.execute(() => 'first')
+    await drain()
+
+    await assert.rejects(breaker.execute(boom), /downstream failure/)
+    assert.equal(breaker.state, 'open')
+
+    // The stale view lands now. Adopting it would rewind the mirror to a
+    // period already gone and zero the probe bookkeeping of the live one.
+    release()
+    await stalled.catch(() => {})
+    assert.equal(breaker.state, 'open', 'a stale read must not resurrect a dead period')
+  })
+
+  test('a peer opening a new period resets this instance probe bookkeeping', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const store = memoryStore({ window: countWindow(10) })
+    const options = { consecutiveFailures: 1, halfOpenAfter: 1_000, halfOpenCalls: 1, name: 'shared' } as const
+    const mine = circuitBreaker({ ...options, stateStore: store })
+    const peer = circuitBreaker({ ...options, stateStore: store })
+
+    await failTimes(mine, 1)
+    t.mock.timers.tick(1_000)
+
+    // I take the single probe slot of period 1 and my call fails, which
+    // reopens the circuit — period 1 is over.
+    await assert.rejects(mine.execute(boom), /downstream failure/)
+    assert.equal(mine.state, 'open')
+
+    // The peer opens period 2 and probes it successfully.
+    t.mock.timers.tick(1_000)
+    assert.equal(await peer.execute(() => 'peer probe'), 'peer probe')
+    assert.equal(peer.state, 'closed')
+
+    // My local slot count belonged to a period that no longer exists: the
+    // new fence starts it over, so I am not locked out of the fresh circuit.
+    assert.equal(await mine.execute(() => 'mine'), 'mine')
+    assert.equal(mine.state, 'closed')
   })
 
   test('a store that elects another instance to probe rejects without leaking the slot', async (t) => {
@@ -667,9 +916,9 @@ describe('shared state store', () => {
     let losses = 2
     const store: StateStore = {
       ...inner,
-      transition: (name, from, to) => {
-        if (losses > 0) { losses--; return false }
-        return inner.transition(name, from, to)
+      compareAndSet: (name, from, to, fence) => {
+        if (losses > 0) { losses--; return { ok: false, snapshot: inner.readState(name) } }
+        return inner.compareAndSet(name, from, to, fence)
       }
     }
     const breaker = circuitBreaker({ name: 'contended', stateStore: store })
@@ -681,10 +930,33 @@ describe('shared state store', () => {
   })
 
   test('isolate gives up when the state never settles', async () => {
-    const store: StateStore = { ...memoryStore(), transition: () => false }
+    const inner = memoryStore()
+    const store: StateStore = { ...inner, compareAndSet: (name) => ({ ok: false, snapshot: inner.readState(name) }) }
     const breaker = circuitBreaker({ name: 'thrashing', stateStore: store })
 
     await assert.rejects(breaker.isolate(), /state kept changing/)
+  })
+
+  test('reset announces nothing when its own swap loses the race', async () => {
+    const inner = memoryStore({ window: countWindow(10) })
+    const store: StateStore = {
+      ...inner,
+      compareAndSet: (name, from, to, fence) => to === 'closed'
+        ? { ok: false, snapshot: inner.readState(name) }
+        : inner.compareAndSet(name, from, to, fence)
+    }
+    const breaker = circuitBreaker({ consecutiveFailures: 1, name: 'reset-race', stateStore: store })
+    await failTimes(breaker, 1)
+    assert.equal(breaker.state, 'open')
+
+    const changes: string[] = []
+    breaker.on('stateChange', ({ to }) => changes.push(to))
+    await breaker.reset()
+
+    // A peer moved first: the circuit is still open, and announcing a close
+    // that never happened would lie to every listener downstream.
+    assert.equal(breaker.state, 'open')
+    assert.deepEqual(changes, [])
   })
 
   test('reset never leaves the isolated state', async () => {
@@ -882,14 +1154,14 @@ describe('async store hardening', () => {
     let stealClose = true
     const store: StateStore = {
       ...inner,
-      transition (name, from, to) {
+      compareAndSet (name, from, to, fence) {
         if (to === 'closed' && from === 'half-open' && stealClose) {
           // A peer instance closed the shared circuit microseconds earlier.
           stealClose = false
-          inner.transition(name, from, to)
-          return false
+          inner.compareAndSet(name, from, to, fence)
+          return { ok: false, snapshot: inner.readState(name) }
         }
-        return inner.transition(name, from, to)
+        return inner.compareAndSet(name, from, to, fence)
       }
     }
     const breaker = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1_000, halfOpenCalls: 1, name: 'peer-close', stateStore: store })
@@ -912,12 +1184,12 @@ describe('async store hardening', () => {
     let failTrip = true
     const store: StateStore = {
       ...inner,
-      transition (name, from, to) {
+      compareAndSet (name, from, to, fence) {
         if (to === 'open' && failTrip) {
           failTrip = false
           throw new Error('redis down')
         }
-        return inner.transition(name, from, to)
+        return inner.compareAndSet(name, from, to, fence)
       }
     }
     const breaker = circuitBreaker({ consecutiveFailures: 1, name: 'no-trip', stateStore: store })
@@ -953,8 +1225,8 @@ describe('async store hardening', () => {
   test('an async store feeds counters and latency as reads land, on the success path too', async () => {
     const inner = memoryStore({ window: countWindow(10) })
     const store: StateStore = {
-      getState: async (name) => inner.getState(name),
-      transition: async (name, from, to) => inner.transition(name, from, to),
+      readState: async (name) => inner.readState(name),
+      compareAndSet: async (name, from, to, fence) => inner.compareAndSet(name, from, to, fence),
       recordSuccess: async (name, ms) => { inner.recordSuccess(name, ms) },
       recordFailure: async (name, ms) => { inner.recordFailure(name, ms) },
       getCounters: async (name) => inner.getCounters(name),
@@ -1015,12 +1287,12 @@ describe('async store hardening', () => {
     let failClose = true
     const store: StateStore = {
       ...inner,
-      transition (name, from, to) {
+      compareAndSet (name, from, to, fence) {
         if (to === 'closed' && from === 'half-open' && failClose) {
           failClose = false
           throw new Error('redis down')
         }
-        return inner.transition(name, from, to)
+        return inner.compareAndSet(name, from, to, fence)
       }
     }
     const breaker = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1_000, halfOpenCalls: 1, name: 'no-close', stateStore: store })
@@ -1049,13 +1321,13 @@ describe('CAS in flight across period changes', () => {
     let holdClose: Promise<void> | undefined
     const store: StateStore = {
       ...inner,
-      async transition (name, from, to) {
+      async compareAndSet (name, from, to, fence) {
         if (from === 'half-open' && to === 'closed' && holdClose !== undefined) {
           const held = holdClose
           holdClose = undefined
           await held
         }
-        return inner.transition(name, from, to)
+        return inner.compareAndSet(name, from, to, fence)
       }
     }
     const breaker = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1_000, halfOpenCalls: 2, name: 'cas-close', stateStore: store })
@@ -1096,13 +1368,13 @@ describe('CAS in flight across period changes', () => {
     let holdTrip: Promise<void> | undefined
     const store: StateStore = {
       ...inner,
-      async transition (name, from, to) {
+      async compareAndSet (name, from, to, fence) {
         if (from === 'half-open' && to === 'open' && holdTrip !== undefined) {
           const held = holdTrip
           holdTrip = undefined
           await held
         }
-        return inner.transition(name, from, to)
+        return inner.compareAndSet(name, from, to, fence)
       }
     }
     const breaker = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1_000, halfOpenCalls: 3, name: 'cas-trip', stateStore: store })
@@ -1181,19 +1453,23 @@ describe('CAS in flight across period changes', () => {
 })
 
 describe('stats timing honesty', () => {
-  test('a mirror that watched the circuit close elsewhere stops reporting open timing', async () => {
+  test('a mirror that watched the circuit close elsewhere stops reporting open timing', async (t) => {
+    // Mock timers rather than a one-millisecond cooldown against the wall
+    // clock: the point here is what B reports, not whether B got scheduled
+    // inside a millisecond.
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
     const store = memoryStore({ window: countWindow(10) })
-    const a = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1, name: 'shared-timing', stateStore: store })
-    const b = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 1, name: 'shared-timing', stateStore: store })
+    const options = { consecutiveFailures: 1, halfOpenAfter: 1_000, halfOpenCalls: 1, name: 'shared-timing', stateStore: store } as const
+    const a = circuitBreaker(options)
+    const b = circuitBreaker(options)
 
     await failTimes(a, 1)
     await assert.rejects(b.execute(() => 'x'), isCircuitOpenError) // B saw it open
     assert.notEqual(b.stats().openedAt, undefined)
 
     // A recovers the shared circuit; B observes closed on its next call.
-    await new Promise((resolve) => setTimeout(resolve, 5))
+    t.mock.timers.tick(1_000)
     await a.execute(() => 'probe 1')
-    await a.execute(() => 'probe 2')
     assert.equal(a.state, 'closed')
 
     await b.execute(() => 'ok')

@@ -36,6 +36,16 @@
         "types": "./dist/otel.d.cts",
         "default": "./dist/otel.cjs"
       }
+    },
+    "./redis": {
+      "import": {
+        "types": "./dist/redis.d.ts",
+        "default": "./dist/redis.mjs"
+      },
+      "require": {
+        "types": "./dist/redis.d.cts",
+        "default": "./dist/redis.cjs"
+      }
     }
   },
   "typesVersions": {
@@ -45,6 +55,9 @@
       ],
       "otel": [
         "dist/otel.d.ts"
+      ],
+      "redis": [
+        "dist/redis.d.ts"
       ]
     }
   },
@@ -81,7 +94,9 @@
     "opentelemetry",
     "otel",
     "tracing",
-    "metrics"
+    "metrics",
+    "redis",
+    "distributed"
   ],
   "author": "Pedro Rogério",
   "license": "MIT",
@@ -111,6 +126,7 @@
     "@stryker-mutator/tap-runner": "^9.6.1",
     "@types/node": "^26.1.1",
     "eslint": "^9.39.5",
+    "ioredis": "^6.0.0",
     "lint-staged": "^17.2.0",
     "neostandard": "^0.13.0",
     "prom-client": "^15.1.3",
