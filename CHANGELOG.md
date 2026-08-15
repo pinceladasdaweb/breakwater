@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 1.1.0 (2026-08-15)
+
+* docs: publish the distributed overhead, and name the zero-glue client by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/9be65a670a1d94acfc6f4f8a63368eae1e7f8d64)
+* feat: push state changes, and share the rate limit quota by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/fb069744f8d8368ec9a9920a9376a5ea79fd93f0)
+* fix: release what the registry built when a definition is dropped by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/96ef0c694791c4e1dde3c76e37097ceda7678dc1)
+
+
 ## 1.0.0 (2026-08-15)
 
 * feat!: distributed circuit breaker via Redis, on a fenced store contract by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/b8f4bbc61df0e064196b30ddd7df23ede465a6e9)
