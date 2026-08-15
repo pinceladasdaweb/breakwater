@@ -2,9 +2,11 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { circuitBreaker } from '../src/circuit-breaker/circuit-breaker'
+import { rateLimit } from '../src/rate-limit/rate-limit'
+import { drain } from './helpers'
 import { countWindow, timeWindow } from '../src/circuit-breaker/window'
 import { isCircuitOpenError } from '../src/errors'
-import { fromIoredis, fromNodeRedis, redisStore, type RedisPort, type ScriptDefinition } from '../src/redis/index'
+import { fromIoredis, fromNodeRedis, redisRateLimit, redisStore, type RedisPort, type ScriptDefinition } from '../src/redis/index'
 
 /** Records what the store asked Redis to do, and answers however a test wants. */
 function fakePort (): RedisPort & {
@@ -36,6 +38,29 @@ function fakePort (): RedisPort & {
 }
 
 const readState = (state: string, fence: number, openedAt = ''): unknown => [state, String(fence), openedAt]
+
+/** A port whose subscription can be driven by hand. */
+function subscribablePort (): ReturnType<typeof fakePort> & {
+  push: (channel: string, message: string) => void
+  channels: string[]
+  releases: () => number
+} {
+  const port = fakePort()
+  const listeners = new Map<string, (message: string) => void>()
+  const channels: string[] = []
+  let released = 0
+
+  return Object.assign(port, {
+    channels,
+    releases: () => released,
+    push: (channel: string, message: string) => listeners.get(channel)?.(message),
+    subscribe (channel: string, onMessage: (message: string) => void) {
+      channels.push(channel)
+      listeners.set(channel, onMessage)
+      return () => { released++; listeners.delete(channel) }
+    }
+  })
+}
 const casReply = (ok: 0 | 1, state: string, fence: number, openedAt = ''): unknown => [ok, state, String(fence), openedAt]
 
 describe('redisStore() options', () => {
@@ -53,6 +78,9 @@ describe('redisStore() options', () => {
     // 'app:{prod}:' would slot every circuit together and leave the
     // multi-key scripts spanning nodes.
     assert.throws(() => redisStore({ client, prefix: 'app:{prod}:' }), { name: 'RangeError', message: /braces/ })
+    // Either brace alone is enough to move the hash slot.
+    assert.throws(() => redisStore({ client, prefix: 'app:{' }), { name: 'RangeError', message: /braces/ })
+    assert.throws(() => redisStore({ client, prefix: 'app:}' }), { name: 'RangeError', message: /braces/ })
     assert.throws(() => redisStore({ client, ttlMs: 0 }), { name: 'RangeError', message: /ttlMs/ })
     // A float reaches PEXPIRE as a float: Lua aborts mid-script, leaving the
     // state written with no expiry at all and the store degraded for good.
@@ -89,7 +117,7 @@ describe('redisStore() options', () => {
     const keys = client.calls.flatMap((call) => call.keys)
     assert.ok(keys.every((key) => key.startsWith('acme:{payments}')), keys.join(', '))
     // Every key of one circuit shares the tag, so multi-key scripts are safe.
-    assert.deepEqual([...new Set(keys)].sort(), ['acme:{payments}', 'acme:{payments}:p', 'acme:{payments}:w'])
+    assert.deepEqual([...new Set(keys)].sort(), ['acme:{payments}', 'acme:{payments}:c', 'acme:{payments}:p', 'acme:{payments}:w'])
   })
 })
 
@@ -130,7 +158,9 @@ describe('redisStore() wire contract', () => {
 
     assert.deepEqual(call(client, 'bwCompareAndSet'), {
       script: 'bwCompareAndSet',
-      keys: ['bw:{api}', 'bw:{api}:p'],
+      // The announce channel travels with the swap: a peer hears about a
+      // transition from the same script that committed it.
+      keys: ['bw:{api}', 'bw:{api}:p', 'bw:{api}:c'],
       args: ['open', 'half-open', 4, 60_000]
     })
     assert.equal(outcome.ok, true)
@@ -794,5 +824,369 @@ describe('client adapters', () => {
     // Reloading on an error that is not NOSCRIPT would hide a real problem
     // behind a pointless retry against a server that is answering fine.
     assert.equal(loads.length, 1)
+  })
+})
+
+describe('redisRateLimit()', () => {
+  const quota = { limit: 10, interval: 1_000, strategy: 'token-bucket' as const, burst: 4 }
+
+  test('a shared quota needs a name — it is the key it lives under', () => {
+    const store = redisRateLimit({ client: fakePort() })
+    assert.throws(
+      () => rateLimit({ limit: 5, interval: 1_000, store }),
+      { name: 'RangeError', message: /stable name/ }
+    )
+    assert.doesNotThrow(() => rateLimit({ limit: 5, interval: 1_000, name: 'api', store }))
+  })
+
+  test('each strategy calls its own script, with the quota the policy owns', async () => {
+    const client = fakePort()
+    client.answer('bwTokenBucket', [1, 0, 3])
+    client.answer('bwSlidingWindow', [1, 0, 9])
+    const store = redisRateLimit({ client })
+
+    await store.acquire('api', quota)
+    assert.deepEqual(client.calls[0], {
+      script: 'bwTokenBucket',
+      keys: ['bwrl:{api}'],
+      // limit, interval, capacity, ttl
+      args: [10, 1_000, 4, 2_000]
+    })
+
+    await store.acquire('api', { ...quota, strategy: 'sliding-window' })
+    const window = client.calls[1]
+    assert.equal(window?.script, 'bwSlidingWindow')
+    assert.deepEqual(window?.keys, ['bwrl:{api}'])
+    assert.deepEqual(window?.args.slice(0, 3), [10, 1_000, 2_000])
+    // The member must be unique per admission, or the sorted set would
+    // collapse two calls into one slot.
+    assert.match(String(window?.args[3]), /^[0-9a-f-]{36}:\d+$/)
+  })
+
+  test('the decision is read from the reply, not inferred', async () => {
+    const client = fakePort()
+    client.answer('bwTokenBucket', [0, 137, 0])
+    const store = redisRateLimit({ client })
+
+    assert.deepEqual(await store.acquire('api', quota), { admitted: false, retryAfterMs: 137, remaining: 0 })
+  })
+
+  test('a shared quota keyed under one hash tag, and a prefix that cannot steal it', () => {
+    assert.throws(() => redisRateLimit({ client: fakePort(), prefix: 'app:{prod}:' }), { name: 'RangeError', message: /braces/ })
+    assert.throws(() => redisRateLimit({ client: fakePort(), prefix: '' }), { name: 'RangeError', message: /prefix/ })
+  })
+
+  test('when Redis is unreachable the quota becomes local, and still holds', async () => {
+    const client = fakePort()
+    client.fail()
+    const store = redisRateLimit({ client, onDegraded: () => {} })
+
+    // Same numbers, enforced by this instance alone: the burst is spent and
+    // then callers are told to wait, rather than everything being admitted.
+    const outcomes = []
+    for (let i = 0; i < 6; i++) outcomes.push(await store.acquire('api', quota))
+
+    assert.equal(outcomes.filter((o) => o.admitted).length, 4, 'the burst, and no more')
+    assert.ok(outcomes.slice(4).every((o) => !o.admitted && o.retryAfterMs > 0))
+    assert.equal(store.isDegraded(), true)
+  })
+
+  test('the degraded sliding window stays exact, instead of behaving like a bucket', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'] })
+    t.mock.timers.setTime(1_000_000)
+    const client = fakePort()
+    client.fail()
+    const store = redisRateLimit({ client, onDegraded: () => {} })
+    const exact = { limit: 10, interval: 1_000, strategy: 'sliding-window' as const, burst: 10 }
+
+    // Hammered for exactly one interval. A token bucket wearing the sliding
+    // window's name would admit roughly twice the limit here.
+    let admitted = 0
+    for (let tick = 0; tick < 100; tick++) {
+      for (let i = 0; i < 3; i++) {
+        if ((await store.acquire('api', exact)).admitted) admitted++
+      }
+      t.mock.timers.tick(10)
+    }
+
+    assert.equal(admitted, 10, 'never more than the limit in any window')
+  })
+
+  test('a quota that changes rebuilds the local limiter rather than freezing the first', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'] })
+    const client = fakePort()
+    client.fail()
+    const store = redisRateLimit({ client, onDegraded: () => {} })
+
+    const generous = { limit: 100, interval: 60_000, strategy: 'token-bucket' as const, burst: 100 }
+    const tight = { limit: 1, interval: 60_000, strategy: 'token-bucket' as const, burst: 1 }
+
+    assert.equal((await store.acquire('api', generous)).admitted, true)
+
+    // The quota travels with the call — a tightened limit must bind here too.
+    assert.equal((await store.acquire('api', tight)).admitted, true)
+    assert.equal((await store.acquire('api', tight)).admitted, false)
+  })
+
+  test('the degraded quota refills over time, like the shared one would', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'] })
+    t.mock.timers.setTime(1_000_000)
+    const client = fakePort()
+    client.fail()
+    const store = redisRateLimit({ client, onDegraded: () => {} })
+    const slow = { limit: 10, interval: 1_000, strategy: 'token-bucket' as const, burst: 1 }
+
+    assert.equal((await store.acquire('api', slow)).admitted, true)
+    assert.equal((await store.acquire('api', slow)).admitted, false)
+
+    // 10 per second is a token every 100ms: a local fallback that did not
+    // refill would reject for the whole outage instead of holding the rate.
+    t.mock.timers.tick(120)
+    assert.equal((await store.acquire('api', slow)).admitted, true)
+
+    // And it stays capped at the burst rather than banking the whole outage.
+    t.mock.timers.tick(10_000)
+    assert.equal((await store.acquire('api', slow)).admitted, true)
+    assert.equal((await store.acquire('api', slow)).admitted, false)
+  })
+
+  test('each name gets its own local quota while degraded', async () => {
+    const client = fakePort()
+    client.fail()
+    const store = redisRateLimit({ client, onDegraded: () => {} })
+    const one = { limit: 1, interval: 60_000, strategy: 'token-bucket' as const, burst: 1 }
+
+    assert.equal((await store.acquire('a', one)).admitted, true)
+    assert.equal((await store.acquire('a', one)).admitted, false)
+    // A different circuit's quota is not spent by the first one's traffic.
+    assert.equal((await store.acquire('b', one)).admitted, true)
+  })
+
+  test('a degraded quota never rejects the caller', async () => {
+    const client: RedisPort = {
+      defineScript: () => {},
+      runScript: async () => await new Promise(() => {})   // never settles
+    }
+    const store = redisRateLimit({ client, commandTimeoutMs: 30, onDegraded: () => {} })
+    const limiter = rateLimit({ limit: 2, interval: 1_000, name: 'quiet', store })
+
+    // A silent backend must not stall the call path either.
+    const started = Date.now()
+    assert.equal(await limiter.execute(() => 'ok'), 'ok')
+    assert.ok(Date.now() - started < 1_000)
+  })
+
+  test('a reply the store cannot read is contained, not obeyed', async (t) => {
+    const reported = t.mock.method(console, 'error', () => {})
+    const client = fakePort()
+    client.answer('bwTokenBucket', 'nonsense')
+    const store = redisRateLimit({ client })
+
+    // Falls back to the local quota rather than admitting on a shrug.
+    const decision = await store.acquire('api', quota)
+    assert.equal(decision.admitted, true)
+    assert.equal(reported.mock.callCount(), 1)
+  })
+
+  test('stats() reports the remaining the shared quota last returned', async () => {
+    const client = fakePort()
+    client.answer('bwTokenBucket', [1, 0, 2])
+    const limiter = rateLimit({ limit: 10, interval: 1_000, burst: 4, name: 'api', store: redisRateLimit({ client }) })
+
+    assert.equal(limiter.stats().remaining, 4, 'the burst, before anything is known')
+    await limiter.execute(() => 'ok')
+    assert.equal(limiter.stats().remaining, 2, 'what the fleet says is left')
+  })
+})
+
+describe('redisStore() pushed state changes', () => {
+  test('an announcement becomes a snapshot on the circuit it names', async () => {
+    const client = subscribablePort()
+    const store = redisStore({ client })
+    const seen: unknown[] = []
+
+    await store.subscribe?.('api', (snapshot) => seen.push(snapshot))
+
+    assert.deepEqual(client.channels, ['bw:{api}:c'])
+    client.push('bw:{api}:c', 'open 7 1786800000000')
+    client.push('bw:{api}:c', 'closed 8 ')
+
+    assert.deepEqual(seen, [
+      { state: 'open', fence: 7, openedAt: 1_786_800_000_000 },
+      { state: 'closed', fence: 8 }
+    ])
+  })
+
+  test('an announcement it cannot read is dropped, not guessed at', async (t) => {
+    const reported = t.mock.method(console, 'error', () => {})
+    const client = subscribablePort()
+    const store = redisStore({ client })
+    const seen: unknown[] = []
+
+    await store.subscribe?.('api', (snapshot) => seen.push(snapshot))
+
+    client.push('bw:{api}:c', 'garbage')                 // no fence at all
+    client.push('bw:{api}:c', 'Isolated 3 ')             // not a state this store knows
+    assert.deepEqual(seen, [], 'the next read is authoritative anyway')
+    assert.equal(reported.mock.callCount(), 1, 'only the unreadable state is worth reporting')
+  })
+
+  test('releasing the subscription stops the pushes', async () => {
+    const client = subscribablePort()
+    const store = redisStore({ client })
+    const seen: unknown[] = []
+
+    const release = await store.subscribe?.('api', (snapshot) => seen.push(snapshot))
+    release?.()
+
+    client.push('bw:{api}:c', 'open 1 1000')
+    assert.deepEqual(seen, [])
+    assert.equal(client.releases(), 1)
+  })
+
+  test('a breaker subscribes once and dispose releases it, idempotently', async () => {
+    const client = subscribablePort()
+    client.answer('bwReadState', readState('closed', 0))
+    const breaker = circuitBreaker({ name: 'watched', stateStore: redisStore({ client }) })
+    await drain()
+
+    assert.deepEqual(client.channels, ['bw:{watched}:c'])
+
+    // A peer opens the circuit; this instance has made no calls at all.
+    client.push('bw:{watched}:c', 'open 4 1000')
+    assert.equal(breaker.state, 'open')
+
+    // A push describing a period already left is a hint about the past.
+    client.push('bw:{watched}:c', 'closed 2 ')
+    assert.equal(breaker.state, 'open')
+
+    breaker.dispose()
+    breaker.dispose()
+    assert.equal(client.releases(), 1)
+    client.push('bw:{watched}:c', 'closed 9 ')
+    assert.equal(breaker.state, 'open')
+  })
+
+  test('the blind attempt budget is per outage, not per process', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'] })
+    t.mock.timers.setTime(1_000_000)
+    const client = fakePort()
+    client.answer('bwReadState', readState('closed', 0))
+    const store = redisStore({ client, degradeForMs: 5_000, onDegraded: () => {} })
+
+    // First outage: the unknown name spends its one attempt.
+    client.fail()
+    await store.readState('rare')
+    await store.readState('rare')
+    const spentInFirst = client.calls.length
+
+    // Recovered.
+    client.heal()
+    t.mock.timers.tick(5_000)
+    await store.readState('other')
+
+    // A second outage must give that name a fresh attempt: otherwise a
+    // circuit somebody isolated fleet-wide reads as 'closed' from here on.
+    client.fail()
+    await store.readState('other')
+    const before = client.calls.length
+    await store.readState('rare')
+    assert.ok(client.calls.length > before, 'a new outage restores the budget')
+    assert.ok(spentInFirst > 0)
+  })
+
+  test('a store that cannot subscribe costs freshness and nothing else', async () => {
+    const client = fakePort()
+    client.answer('bwReadState', readState('closed', 0))
+    const store = redisStore({ client })
+    // A port with no subscription capability must not advertise one, or the
+    // breaker would wire a listener that can never fire.
+    assert.equal(store.subscribe, undefined)
+    const breaker = circuitBreaker({ name: 'unwatched', stateStore: store })
+
+    assert.equal(await breaker.execute(() => 'ok'), 'ok')
+    assert.doesNotThrow(() => breaker.dispose())
+  })
+})
+
+describe('fromIoredis() subscriptions', () => {
+  const subscriberDouble = (): {
+    subscribed: string[]
+    unsubscribed: string[]
+    listeners: Array<(channel: string, message: string) => void>
+    subscribe: (channel: string) => Promise<unknown>
+    unsubscribe: (channel: string) => Promise<unknown>
+    on: (event: 'message', listener: (channel: string, message: string) => void) => unknown
+    off: (event: 'message', listener: (channel: string, message: string) => void) => unknown
+  } => {
+    const state = {
+      subscribed: [] as string[],
+      unsubscribed: [] as string[],
+      listeners: [] as Array<(channel: string, message: string) => void>
+    }
+    return {
+      ...state,
+      subscribe: async (channel: string) => { state.subscribed.push(channel); return 1 },
+      unsubscribe: async (channel: string) => { state.unsubscribed.push(channel); return 1 },
+      on: (_event, listener) => state.listeners.push(listener),
+      off: (_event, listener) => {
+        const at = state.listeners.indexOf(listener)
+        if (at >= 0) state.listeners.splice(at, 1)
+        return undefined
+      }
+    }
+  }
+
+  test('only messages for the subscribed channel reach the handler', async () => {
+    const subscriber = subscriberDouble()
+    const port = fromIoredis({ defineCommand: () => {} }, subscriber)
+    const seen: string[] = []
+
+    const release = await port.subscribe?.('bw:{api}:c', (message) => seen.push(message))
+    assert.deepEqual(subscriber.subscribed, ['bw:{api}:c'])
+
+    for (const listener of subscriber.listeners) {
+      listener('bw:{api}:c', 'open 1 1000')
+      listener('bw:{other}:c', 'open 9 9000')   // a different circuit on the same connection
+    }
+    assert.deepEqual(seen, ['open 1 1000'])
+
+    // Releasing detaches the listener AND leaves the channel.
+    release?.()
+    assert.deepEqual(subscriber.unsubscribed, ['bw:{api}:c'])
+    assert.equal(subscriber.listeners.length, 0)
+  })
+
+  test('a subscribe that fails leaves no listener behind', async () => {
+    const subscriber = subscriberDouble()
+    subscriber.subscribe = async () => { throw new Error('redis is down') }
+    const port = fromIoredis({ defineCommand: () => {} }, subscriber)
+
+    await assert.rejects(port.subscribe?.('bw:{api}:c', () => {}) as Promise<unknown>, /redis is down/)
+    // The caller never got a release function, so this was the only chance.
+    assert.equal(subscriber.listeners.length, 0)
+  })
+
+  test('leaving a channel waits for the last listener on it', async () => {
+    const subscriber = subscriberDouble()
+    const port = fromIoredis({ defineCommand: () => {} }, subscriber)
+
+    const first = await port.subscribe?.('bw:{api}:c', () => {})
+    const second = await port.subscribe?.('bw:{api}:c', () => {})
+
+    first?.()
+    assert.deepEqual(subscriber.unsubscribed, [], 'somebody is still listening on that channel')
+
+    second?.()
+    assert.deepEqual(subscriber.unsubscribed, ['bw:{api}:c'])
+
+    // And releasing twice does not decrement somebody else's count.
+    second?.()
+    assert.deepEqual(subscriber.unsubscribed, ['bw:{api}:c'])
+  })
+
+  test('without a second connection the port simply does not subscribe', () => {
+    const port = fromIoredis({ defineCommand: () => {} })
+    assert.equal(port.subscribe, undefined)
   })
 })

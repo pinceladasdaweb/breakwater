@@ -1,11 +1,15 @@
 import { SCRIPTS } from './scripts'
+import { createRunner } from './runner'
 import { type RedisPort } from './port'
 import { timeWindow, type Window } from '../circuit-breaker/window'
-import { assertNonEmptyString, assertPositiveFinite, assertPositiveInt } from '../validate'
+import { assertNonEmptyString, assertPositiveInt } from '../validate'
 import { memoryStore, type BreakerState, type CasOutcome, type LatencyStats, type StateSnapshot, type StateStore, type WindowCounters } from '../circuit-breaker/state-store'
 
 export { fromIoredis, fromNodeRedis } from './port'
 export type { RedisPort, ScriptDefinition } from './port'
+
+export { redisRateLimit } from './rate-limit'
+export type { RedisRateLimitOptions, RedisRateLimitStore } from './rate-limit'
 
 export interface RedisStoreOptions {
   /**
@@ -119,8 +123,6 @@ export function redisStore (options: RedisStoreOptions): RedisStore {
   const bucketMs = Math.max(1, Math.ceil(windowMs / 10))
   const ttlMs = options.ttlMs ?? Math.max(windowMs * 4, 60_000)
   const probeTtlMs = options.probeTtlMs ?? 10_000
-  const degradeForMs = options.degradeForMs ?? 5_000
-  const commandTimeoutMs = options.commandTimeoutMs ?? 500
   assertNonEmptyString('prefix', prefix)
   if (prefix.includes('{') || prefix.includes('}')) {
     // Redis Cluster hashes on the FIRST brace pair, so a prefix like
@@ -131,13 +133,24 @@ export function redisStore (options: RedisStoreOptions): RedisStore {
   }
   assertPositiveInt('ttlMs', ttlMs)
   assertPositiveInt('probeTtlMs', probeTtlMs)
-  assertPositiveFinite('degradeForMs', degradeForMs)
-  assertPositiveFinite('commandTimeoutMs', commandTimeoutMs)
 
-  const onDegraded = options.onDegraded ?? ((error: unknown) => {
-    console.error('breakwater: redis state store failed — the circuit is local until it recovers', error)
+  // Names already given their one blind attempt this outage. Declared before
+  // the runner so recovery can clear it: the budget is per OUTAGE, and a set
+  // that only emptied on close() would spend it once per process.
+  const askedWhileBlind = new Set<string>()
+
+  const { run, isDegraded, isSkipping } = createRunner({
+    client,
+    ...(options.commandTimeoutMs !== undefined && { commandTimeoutMs: options.commandTimeoutMs }),
+    ...(options.degradeForMs !== undefined && { degradeForMs: options.degradeForMs }),
+    onDegraded: options.onDegraded ?? ((error: unknown) => {
+      console.error('breakwater: redis state store unreachable — the circuit is local until it recovers', error)
+    }),
+    onRecovered: () => {
+      askedWhileBlind.clear()
+      options.onRecovered?.()
+    }
   })
-  const onRecovered = options.onRecovered ?? (() => {})
 
   // Identifies this store instance in the probe election. A majority has to
   // come from somewhere, so the holder is re-elected for the rest of the
@@ -164,6 +177,7 @@ export function redisStore (options: RedisStoreOptions): RedisStore {
   const stateKey = (name: string): string => tag(name)
   const windowKey = (name: string): string => `${tag(name)}:w`
   const probeKey = (name: string): string => `${tag(name)}:p`
+  const channelKey = (name: string): string => `${tag(name)}:c`
 
   // What this instance knows: fed by every Redis answer, and the authority
   // while Redis is unreachable.
@@ -171,103 +185,6 @@ export function redisStore (options: RedisStoreOptions): RedisStore {
   // Counters and durations for THIS instance — the degraded fallback, and
   // the source of the latency percentiles either way.
   let local = memoryStore({ window })
-
-  let degradedUntil = 0
-  let degraded = false
-
-  const degrade = (error: unknown): void => {
-    degradedUntil = Date.now() + degradeForMs
-    if (degraded) return
-    degraded = true
-    try {
-      onDegraded(error)
-    } catch (reportingError) {
-      // The promise is that no method here rejects. A logger that throws —
-      // a serializer choking on a driver error, a misconfigured transport —
-      // must not turn a Redis outage into a failed request.
-      console.error('breakwater: redis onDegraded threw', reportingError)
-    }
-  }
-
-  /**
-   * Bounds one command. A driver that queues while disconnected would
-   * otherwise never settle, and a promise that never settles is worse than
-   * an error: nothing degrades, and every protected call waits on it.
-   */
-  const bounded = async (command: Promise<unknown>): Promise<unknown> => {
-    // The command may still reject long after we gave up on it, and nobody
-    // would be listening.
-    command.catch(() => {})
-    let timer: ReturnType<typeof setTimeout> | undefined
-    try {
-      return await Promise.race([
-        command,
-        // Deliberately NOT unref'd: this timer is the only thing keeping the
-        // caller's promise alive while a silent backend is being waited on,
-        // and an idle process would otherwise drain the loop and leave that
-        // caller hanging — the exact failure the bound exists to prevent.
-        // The finally below always clears it, so it outlives nothing.
-        new Promise((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error(`redis command exceeded ${commandTimeoutMs}ms`)), commandTimeoutMs)
-        })
-      ])
-    } finally {
-      if (timer !== undefined) clearTimeout(timer)
-    }
-  }
-
-  // Commands land out of order, so health is decided by the newest one that
-  // COMPLETED, not by the last one to finish. Without this a single slow
-  // command failing late takes a provably healthy store local — and while
-  // local, every instance believes it may probe.
-  let commandSeq = 0
-  let newestSuccess = 0
-
-  const run = async <T>(
-    script: string,
-    keys: string[],
-    args: Array<string | number>,
-    parse: (raw: unknown) => T,
-    fallback: () => T,
-    force = false
-  ): Promise<T> => {
-    if (!force && Date.now() < degradedUntil) return fallback()
-
-    const seq = ++commandSeq
-    let raw: unknown
-    try {
-      raw = await bounded(client.runScript(script, keys, args))
-    } catch (error) {
-      if (seq > newestSuccess) degrade(error)
-      return fallback()
-    }
-
-    if (seq > newestSuccess) {
-      newestSuccess = seq
-      if (degraded) {
-        degraded = false
-        // Cleared together: reporting recovery while still serving from the
-        // mirror would tell an operator the circuit is shared again when
-        // every decision is still this instance's alone.
-        degradedUntil = 0
-        askedWhileBlind.clear()
-        try {
-          onRecovered()
-        } catch (reportingError) {
-          console.error('breakwater: redis onRecovered threw', reportingError)
-        }
-      }
-    }
-
-    try {
-      return parse(raw)
-    } catch (error) {
-      // Not a reachability problem: a reply we cannot read means the client
-      // or the server is speaking a shape this store does not know.
-      console.error('breakwater: unexpected reply from the redis state store', error)
-      return fallback()
-    }
-  }
 
   const remember = (name: string, snapshot: StateSnapshot): StateSnapshot => {
     mirror.set(name, snapshot)
@@ -281,9 +198,6 @@ export function redisStore (options: RedisStoreOptions): RedisStore {
   // step. Spending one upstream would let an instance that saw nothing close
   // a period it never observed.
   const mintedBlind = new Map<string, number>()
-  // Names already given their one blind attempt, so an outage costs a bounded
-  // number of timed-out commands rather than one per call.
-  const askedWhileBlind = new Set<string>()
 
   const asSnapshot = (raw: unknown): StateSnapshot => {
     const [state, fence, openedAt] = raw as [string, string, string]
@@ -340,7 +254,7 @@ export function redisStore (options: RedisStoreOptions): RedisStore {
       // circuit somebody isolated fleet-wide. So an unknown name is worth
       // one real attempt even inside the cooldown; the command is bounded,
       // and it is tried once per name per outage, not once per call.
-      const blindGuess = !mirror.has(name) && Date.now() < degradedUntil
+      const blindGuess = !mirror.has(name) && isSkipping()
       const force = blindGuess && !askedWhileBlind.has(name)
       if (force) askedWhileBlind.add(name)
 
@@ -359,7 +273,7 @@ export function redisStore (options: RedisStoreOptions): RedisStore {
     },
 
     compareAndSet: async (name, from, to, fence) => {
-      if (Date.now() >= degradedUntil && mintedBlind.get(name) === fence) {
+      if (!isSkipping() && mintedBlind.get(name) === fence) {
         // Redis is back but this fence was invented while it was away: refuse
         // rather than gamble on the numbers coinciding. The breaker re-reads
         // the real state on its next call.
@@ -367,7 +281,7 @@ export function redisStore (options: RedisStoreOptions): RedisStore {
       }
       return await run(
         'bwCompareAndSet',
-        [stateKey(name), probeKey(name)],
+        [stateKey(name), probeKey(name), channelKey(name)],
         [from, to, fence, ttlMs],
         (raw) => {
           const [ok, state, nextFence, openedAt] = raw as [number, string, string, string]
@@ -421,7 +335,25 @@ export function redisStore (options: RedisStoreOptions): RedisStore {
       await run('bwDelete', [stateKey(name), windowKey(name), probeKey(name)], [], () => undefined, () => undefined)
     },
 
-    isDegraded: () => degraded || Date.now() < degradedUntil,
+    ...(client.subscribe !== undefined && {
+      subscribe: async (name: string, onChange: (snapshot: StateSnapshot) => void) => {
+        // Announced by the swap itself: `state fence openedAt`, with the
+        // timing empty when the period ended. A message we cannot read is
+        // dropped rather than guessed at — the next read is authoritative
+        // anyway, which is what makes pushes safe to treat as a hint.
+        return await client.subscribe!(channelKey(name), (message) => {
+          const [state, fence, openedAt] = message.split(' ')
+          if (state === undefined || fence === undefined) return
+          try {
+            onChange(asSnapshot([state, fence, openedAt ?? '']))
+          } catch (error) {
+            console.error('breakwater: unreadable state change pushed from redis', error)
+          }
+        })
+      }
+    }),
+
+    isDegraded,
 
     close () {
       mirror.clear()

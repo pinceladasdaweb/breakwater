@@ -24,6 +24,14 @@ export interface ScriptDefinition {
 export interface RedisPort {
   defineScript: (name: string, definition: ScriptDefinition) => void | Promise<void>
   runScript: (name: string, keys: string[], args: Array<string | number>) => Promise<unknown>
+  /**
+   * Optional: listen on a channel, and hand back a way to stop.
+   *
+   * Subscriptions need a connection of their own — a client in subscriber
+   * mode cannot run commands — so this is separate from `runScript` and a
+   * store without it simply does no pushing.
+   */
+  subscribe?: (channel: string, onMessage: (message: string) => void) => (() => void) | Promise<() => void>
 }
 
 /**
@@ -35,13 +43,61 @@ interface IoredisLike {
   defineCommand: (name: string, definition: { numberOfKeys: number, lua: string }) => void
 }
 
+interface IoredisSubscriber {
+  subscribe: (channel: string) => Promise<unknown>
+  unsubscribe: (channel: string) => Promise<unknown>
+  on: (event: 'message', listener: (channel: string, message: string) => void) => unknown
+  off: (event: 'message', listener: (channel: string, message: string) => void) => unknown
+}
+
 /**
  * Adapts an ioredis (or ioredis Cluster) client. `defineCommand` installs
  * the script as a method on the client, which ioredis calls through
  * EVALSHA and reloads on NOSCRIPT.
+ *
+ * Pass a SECOND connection — `client.duplicate()` — to enable pushed state
+ * changes. ioredis puts a subscribed connection into subscriber mode, where
+ * it can no longer run commands, so the two cannot be the same.
  */
-export function fromIoredis (client: IoredisLike): RedisPort {
+export function fromIoredis (client: IoredisLike, subscriber?: IoredisSubscriber): RedisPort {
+  // One connection carries every channel, so leaving one is only safe when
+  // the last listener on it is gone. Without this, disposing one breaker
+  // silently stops the pushes for every other breaker sharing its name.
+  const listenersPerChannel = new Map<string, number>()
+
   return {
+    ...(subscriber !== undefined && {
+      async subscribe (channel: string, onMessage: (message: string) => void) {
+        const listener = (from: string, message: string): void => {
+          if (from === channel) onMessage(message)
+        }
+        subscriber.on('message', listener)
+        try {
+          await subscriber.subscribe(channel)
+        } catch (error) {
+          // The caller never gets a release function for a subscription that
+          // did not happen, so detaching here is the only chance to.
+          subscriber.off('message', listener)
+          throw error
+        }
+        listenersPerChannel.set(channel, (listenersPerChannel.get(channel) ?? 0) + 1)
+
+        let released = false
+        return () => {
+          if (released) return
+          released = true
+          subscriber.off('message', listener)
+          const left = (listenersPerChannel.get(channel) ?? 1) - 1
+          if (left > 0) {
+            listenersPerChannel.set(channel, left)
+            return
+          }
+          listenersPerChannel.delete(channel)
+          subscriber.unsubscribe(channel).catch(() => {})
+        }
+      }
+    }),
+
     defineScript (name, definition) {
       client.defineCommand(name, { numberOfKeys: definition.numberOfKeys, lua: definition.lua })
     },

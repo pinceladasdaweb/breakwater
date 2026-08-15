@@ -93,6 +93,13 @@ export interface CircuitBreakerPolicy extends Policy, Observable<CircuitBreakerE
   unisolate: () => Promise<void>
   /** Clears counters and returns to closed (e.g. after a reconnection). */
   reset: () => Promise<void>
+  /**
+   * Releases what this policy holds — today, the state store subscription
+   * that pushes a peer's transitions. Safe to call more than once, and the
+   * breaker keeps working afterwards: it simply goes back to learning about
+   * the shared circuit on its next read.
+   */
+  dispose: () => void
 }
 
 const EMPTY_COUNTERS: WindowCounters = { successes: 0, failures: 0, totalCalls: 0, failureRate: 0 }
@@ -143,6 +150,9 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
   // one — and the same fence goes into every swap, so the store rejects a
   // stale decision even when it was this process that fell behind.
   let currentFence = 0
+  // Subscription lifecycle, declared early so a push arriving late can see it.
+  let unsubscribe: (() => void) | undefined
+  let disposed = false
 
   // Bookkeeping must never change an execution's outcome or crash the
   // process: a store that fails to RECORD degrades to last-known values,
@@ -249,6 +259,20 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
     localState = snapshot.state
     if (snapshot.openedAt !== undefined) openedAt = snapshot.openedAt
     else if (snapshot.state !== 'open' && snapshot.state !== 'half-open') openedAt = undefined
+  }
+
+  /**
+   * A transition a peer performed, pushed to us. It is a notification rather
+   * than an authority: it carries no ordering against reads already in
+   * flight, so a period we have already left is dropped instead of adopted.
+   */
+  const adoptPush = (snapshot: StateSnapshot): void => {
+    if (disposed || snapshot.fence < currentFence) return
+    // Tied to the newest observation rather than stamped ahead of it: a read
+    // already in flight was dispatched before this announcement was heard,
+    // and letting the push win would discard a FRESHER view of the circuit —
+    // including the period timing the next admission decision is made on.
+    adopt(snapshot, adoptedSeq)
   }
 
   /** Reads the circuit and refreshes the mirrors, ageing the read honestly. */
@@ -435,9 +459,45 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
     }
   })
 
+  // Best effort by construction: a store that cannot subscribe, or fails to,
+  // costs nothing but freshness — every execution still reads before it
+  // decides.
+  // An unnamed breaker gets a generated name, so its channel is one nobody
+  // else will ever publish to: a permanent subscription with nothing to say.
+  if (store.subscribe !== undefined && options.name !== undefined) {
+    try {
+      // Duck-typed like the rest of the codebase: a store may hand back a
+      // thenable from another realm, and `instanceof` would miss it.
+      const subscription = store.subscribe(name, adoptPush) as (() => void) | PromiseLike<() => void>
+      if (typeof (subscription as PromiseLike<() => void>).then === 'function') {
+        Promise.resolve(subscription).then(
+          (release) => { if (disposed) release(); else unsubscribe = release },
+          reportStoreError
+        )
+      } else {
+        unsubscribe = subscription as () => void
+      }
+    } catch (error) {
+      reportStoreError(error)
+    }
+  }
+
   const policy = {
     ...base,
     kind: 'circuitBreaker' as const,
+
+    dispose () {
+      disposed = true
+      const release = unsubscribe
+      unsubscribe = undefined
+      if (release === undefined) return
+      try {
+        release()
+      } catch (error) {
+        reportStoreError(error)
+      }
+    },
+
     get state () {
       return localState
     },

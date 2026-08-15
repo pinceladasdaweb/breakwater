@@ -50,7 +50,7 @@ export { bulkhead } from './bulkhead/bulkhead'
 export type { BulkheadOptions, BulkheadEvents, BulkheadPolicy, BulkheadStats } from './bulkhead/bulkhead'
 
 export { rateLimit } from './rate-limit/rate-limit'
-export type { RateLimitOptions, RateLimitEvents, RateLimitPolicy, RateLimitStats } from './rate-limit/rate-limit'
+export type { RateLimitOptions, RateLimitEvents, RateLimitPolicy, RateLimitStats, RateLimitStore, RateLimitQuota, RateLimitDecision } from './rate-limit/rate-limit'
 
 export { fallback } from './fallback/fallback'
 export type { FallbackHandler, FallbackOptions, FallbackEvents, FallbackPolicy } from './fallback/fallback'

@@ -128,7 +128,8 @@ app.get('/quotes', async (req, res) => {
 - **Failures do consume it** — the call was made; the dependency saw it.
 - **Per-instance, in-memory.** Ten service instances each allowing 100/min
   add up to 1000/min against the dependency. Divide the quota by your
-  instance count, or wait for the planned distributed tooling.
+  instance count, or share the quota with
+  [`redisRateLimit`](redis.md#sharing-the-rate-limit-too).
 - **Rate limit ≠ bulkhead.** 100/min says nothing about concurrency: one
   slow endpoint can still pile up 100 concurrent calls. Use both when both
   dimensions matter.

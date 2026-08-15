@@ -72,6 +72,36 @@ The period's timing lives in Redis too, stamped from the **server clock**.
 That is what makes every instance agree on when probing may start — including
 one that joined after the trip and never saw it happen.
 
+## Pushed state changes
+
+By default an instance learns that a peer opened the circuit on its **next
+read**, which is the next call it makes. Give the store a subscription and it
+learns immediately instead:
+
+```ts
+import Redis from 'ioredis'
+import { fromIoredis, redisStore } from 'breakwater/redis'
+
+const client = new Redis(url)
+// A subscribed connection cannot run commands, so pushes need their own.
+const store = redisStore({ client: fromIoredis(client, client.duplicate()) })
+```
+
+The announcement is published by the same Lua script that commits the swap,
+so nobody hears about a transition that did not happen. A push refreshes the
+mirror and **emits no events** — learning it from a push is the same thing as
+learning it from a read, and emitting would count one fleet-wide transition
+once per instance that heard it.
+
+Pushes are a hint, never an authority: delivery is best effort, a message
+that describes a period the instance has already left is dropped, and every
+execution still reads the state it decides on. Losing one costs freshness,
+not correctness.
+
+Call `breaker.dispose()` to release the subscription when the policy goes
+away; it is safe to call more than once, and the breaker keeps working
+afterwards by going back to reading.
+
 ## Options
 
 ```ts
@@ -139,6 +169,50 @@ Three limits worth knowing before you rely on this in an incident:
   sweep uses the window of whoever is asking, so a peer configured with a
   shorter one will discard buckets the others were still counting. Change it
   fleet-wide, not per rollout.
+- **Write access to Redis is control of the circuit.** Whoever can write
+  these keys can hold a dependency open for the whole fleet, or force it
+  closed while it is failing — and can announce a transition on the channel
+  that never happened. Replies are validated, so a malformed one is refused
+  rather than believed, and a forged push is corrected by the next read; none
+  of that substitutes for the obvious. Require auth, keep the instance off
+  public networks, and treat it as the shared control plane it is.
+
+## Sharing the rate limit too
+
+The same idea, for quota: `limit` per `interval` for the **fleet** rather than
+per process.
+
+```ts
+import { rateLimit } from 'breakwater'
+import { redisRateLimit, fromIoredis } from 'breakwater/redis'
+
+const partner = rateLimit({
+  name: 'partner-api',      // the key the quota lives under — required
+  limit: 100,
+  interval: 60_000,
+  strategy: 'sliding-window',
+  store: redisRateLimit({ client: fromIoredis(client) })
+})
+```
+
+Both strategies keep the semantics of their in-process counterparts —
+continuous refill for the token bucket, exactness for the sliding window —
+and every decision is a single atomic script, because deciding and consuming
+in two steps is how two instances both spend the last slot.
+
+The degraded behavior is the one worth reading twice. **When Redis is
+unreachable the quota becomes local**, enforced by this instance alone with
+the same numbers. A fleet of N then allows up to N times the rate for the
+length of the outage. That is deliberate: the alternative is a rate limiter
+that rejects everything the moment its bookkeeping is unreachable, and a
+client-side quota exists to be polite to a dependency, not to be the reason
+your service stops. If the limit is a hard contractual ceiling rather than
+courtesy, keep the numbers well under it, or let the dependency's own
+enforcement be the authority it already is.
+
+`redisRateLimit` takes the same operational options as the state store —
+`prefix` (default `bwrl:`), `commandTimeoutMs`, `degradeForMs`, `onDegraded`,
+`onRecovered` — and answers `isDegraded()` the same way.
 
 ## What stays per-instance, on purpose
 
@@ -165,7 +239,18 @@ interface RedisPort {
 |---|---|
 | ioredis (incl. Cluster) | `fromIoredis(client)` — scripts become client commands, called by SHA and reloaded on `NOSCRIPT` |
 | node-redis v4+ | `fromNodeRedis(client)` — `SCRIPT LOAD` on first use, then `EVALSHA`, reloading once if the server forgot it |
+| [`@pinceladasdaweb/redis`](https://www.npmjs.com/package/@pinceladasdaweb/redis) 4.1+ | none — it already registers scripts by name, so the client **is** the port: `redisStore({ client })` |
 | anything else | implement the two methods; a client that already registers scripts by name satisfies it directly |
+
+```ts
+// No adapter at all when the client speaks the port natively:
+import { RedisClient } from '@pinceladasdaweb/redis'
+import { redisStore } from 'breakwater/redis'
+
+const redis = new RedisClient({ host, port })
+await redis.connect()
+const store = redisStore({ client: redis })
+```
 
 Registering by name rather than sending the script body matters here: a
 circuit breaker evaluates state on **every request**, and `EVAL` ships the
@@ -189,6 +274,37 @@ made in between, and during a fleet-wide outage every instance is writing at
 once — so each would undercount the others and open late, exactly when the
 decision matters most. The extra trip buys a decision that is actually the
 fleet's.
+
+### What that costs, measured
+
+Reproduce with [`benchmarks/redis-overhead.mjs`](../benchmarks/redis-overhead.mjs);
+these are 2000 sequential calls per row against Redis 7 on loopback:
+
+| path | ops/sec | p50 | p99 |
+|---|---:|---:|---:|
+| memory · healthy call | 389,279 | 0.002 ms | 0.012 ms |
+| **redis · healthy call** | **3,904** | **0.244 ms** | 0.500 ms |
+| memory · fast rejection | 85,589 | 0.011 ms | 0.026 ms |
+| **redis · fast rejection** | **6,682** | **0.144 ms** | 0.255 ms |
+
+Read those two numbers, not the ratio. The ratio (≈136×) is the kind of
+figure that decides nothing; **+0.24 ms per protected call** is the number you
+size against, and it is almost entirely round trips — which is why the fast
+rejection, at two trips instead of three, is the *cheaper* path here.
+
+Two caveats that matter more than the table:
+
+- **Loopback is the floor.** There is no network in these numbers. Add your
+  real RTT three times over for a healthy call: at 1 ms to your Redis, expect
+  roughly 3 ms, and the in-process work stays lost in the noise.
+- **The ops/sec column is latency, not capacity.** The benchmark is
+  sequential, so it measures one call at a time. A service making these calls
+  concurrently is bounded by its connection and its Redis, not by 3,904.
+
+If that budget does not fit a given call path, the answer is not a faster
+store — it is to keep that path on the in-memory store and share only the
+circuits where the fleet agreeing is worth a couple of round trips. Both kinds
+of breaker compose in the same pipeline.
 
 ## Gotchas
 

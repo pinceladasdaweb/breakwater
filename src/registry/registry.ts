@@ -27,9 +27,21 @@ export interface PolicyRegistry {
   has: (name: string) => boolean
   /** The defined names, in definition order. */
   names: () => string[]
-  /** Removes one definition (mostly useful in tests). */
+  /**
+   * Removes one definition (mostly useful in tests), releasing it if the
+   * registry built it — see `clear()` for why that condition matters.
+   */
   delete: (name: string) => boolean
-  /** Removes every definition (mostly useful in tests). */
+  /**
+   * Removes every definition (mostly useful in tests), releasing the ones the
+   * registry built.
+   *
+   * Only those: a prebuilt policy handed to `define()` is still held by
+   * whoever built it, and tearing it down here would break a caller that is
+   * still using it. What the registry built from options, though, it is the
+   * sole owner of — dropping the entry would otherwise leave a breaker's
+   * subscription alive with nothing left to release it.
+   */
   clear: () => void
 }
 
@@ -60,6 +72,14 @@ const withDefaultNames = (name: string, options: ResilienceOptions): ResilienceO
 
 export function createPolicyRegistry (initial?: Record<string, ResilienceOptions | Policy>): PolicyRegistry {
   const entries = new Map<string, Policy>()
+  // What the registry built, and is therefore the registry's to release.
+  const built = new WeakSet<Policy>()
+
+  const release = (policy: Policy | undefined): void => {
+    if (policy === undefined || !built.has(policy)) return
+    const releasable = policy as { dispose?: () => void }
+    if (typeof releasable.dispose === 'function') releasable.dispose()
+  }
 
   const registry: PolicyRegistry = {
     define (name, config) {
@@ -68,7 +88,9 @@ export function createPolicyRegistry (initial?: Record<string, ResilienceOptions
         throw new RangeError(`policy "${name}" is already defined — a second definition would silently diverge from the first`)
       }
 
-      const policy = isPolicy(config) ? config : resilience(withDefaultNames(name, config))
+      const prebuilt = isPolicy(config)
+      const policy = prebuilt ? config : resilience(withDefaultNames(name, config))
+      if (!prebuilt) built.add(policy)
       entries.set(name, policy)
       return policy
     },
@@ -94,8 +116,19 @@ export function createPolicyRegistry (initial?: Record<string, ResilienceOptions
 
     has: (name) => entries.has(name),
     names: () => [...entries.keys()],
-    delete: (name) => entries.delete(name),
-    clear: () => entries.clear()
+    delete (name) {
+      release(entries.get(name))
+      return entries.delete(name)
+    },
+
+    clear () {
+      // Emptied first, so a release that goes wrong cannot leave the registry
+      // holding entries it has already torn down. Nothing built here throws
+      // from dispose() today — this just keeps that from being load-bearing.
+      const defined = [...entries.values()]
+      entries.clear()
+      for (const policy of defined) release(policy)
+    }
   }
 
   if (initial !== undefined) registry.defineAll(initial)

@@ -2,6 +2,8 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { circuitBreaker } from '../src/circuit-breaker/circuit-breaker'
+import { resilience } from '../src/compose/resilience'
+import { fixed } from '../src/retry/backoff'
 import { memoryStore, type LatencyStats, type StateSnapshot, type StateStore } from '../src/circuit-breaker/state-store'
 import { countWindow, timeWindow } from '../src/circuit-breaker/window'
 import { isCircuitOpenError, isIsolatedError } from '../src/errors'
@@ -854,6 +856,92 @@ describe('shared state store', () => {
     release()
     await stalled.catch(() => {})
     assert.equal(breaker.state, 'open', 'a stale read must not resurrect a dead period')
+  })
+
+  test('a pushed transition never overwrites a fresher read still in flight', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    t.mock.timers.setTime(1_000_000)
+    const inner = memoryStore({ window: countWindow(10) })
+    let push: ((snapshot: StateSnapshot) => void) | undefined
+    let hold: Promise<void> | undefined
+    const store: StateStore = {
+      ...inner,
+      async readState (name) {
+        const snapshot = inner.readState(name)
+        if (hold !== undefined) {
+          const held = hold
+          hold = undefined
+          await held
+        }
+        return snapshot
+      },
+      compareAndSet: async (name, from, to, fence) => inner.compareAndSet(name, from, to, fence),
+      recordSuccess: async (name, ms) => { inner.recordSuccess(name, ms) },
+      recordFailure: async (name, ms) => { inner.recordFailure(name, ms) },
+      getCounters: async (name) => inner.getCounters(name),
+      resetCounters: async (name) => { inner.resetCounters(name) },
+      acquireProbe: async () => true,
+      subscribe: (_name, onChange) => { push = onChange; return () => { push = undefined } }
+    }
+    const breaker = circuitBreaker({ consecutiveFailures: 1, halfOpenAfter: 30_000, name: 'pushed', stateStore: store })
+
+    await failTimes(breaker, 1)
+    const current = breaker.stats()
+    assert.equal(breaker.state, 'open')
+
+    // A read starts; while it is in flight, a stale announcement of an
+    // EARLIER period arrives, carrying long-expired timing.
+    const { promise: held, resolve: release } = Promise.withResolvers<void>()
+    hold = held
+    const pending = breaker.execute(() => 'never runs')
+    await drain()
+    push?.({ state: 'open', fence: 0, openedAt: 1_000_000 - 60_000 })
+    release()
+
+    // Adopting it would put nextAttemptAt in the past and admit this call as
+    // a probe, 30 seconds early.
+    await assert.rejects(pending, isCircuitOpenError)
+    assert.equal(breaker.stats().openedAt, current.openedAt)
+
+    breaker.dispose()
+  })
+
+  test('dispose reaches a breaker built through a composition', async () => {
+    const inner = memoryStore({ window: countWindow(10) })
+    let released = 0
+    const store: StateStore = {
+      ...inner,
+      subscribe: () => () => { released++ }
+    }
+    const pipeline = resilience({
+      circuitBreaker: { name: 'composed', stateStore: store },
+      retry: { attempts: 2, backoff: fixed(0) }
+    })
+
+    assert.equal(await pipeline.execute(() => 'ok'), 'ok')
+
+    // The breaker is not a handle the caller ever received, so without this
+    // its subscription could never be let go.
+    pipeline.dispose()
+    assert.equal(released, 1)
+    pipeline.dispose()
+    assert.equal(released, 1, 'and it is safe to call twice')
+  })
+
+  test('an unnamed breaker subscribes to nobody', () => {
+    const inner = memoryStore({ window: countWindow(10) })
+    let subscribed = 0
+    const store: StateStore = {
+      ...inner,
+      subscribe: () => { subscribed++; return () => {} }
+    }
+
+    // Its generated name means a channel no peer will ever publish to.
+    circuitBreaker({ stateStore: store })
+    assert.equal(subscribed, 0)
+
+    circuitBreaker({ name: 'real', stateStore: store })
+    assert.equal(subscribed, 1)
   })
 
   test('a peer opening a new period resets this instance probe bookkeeping', async (t) => {

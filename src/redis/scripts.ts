@@ -83,10 +83,10 @@ return { state, fence, openedAt }
  * a round trip and arrives after the world moved on is refused here, in one
  * atomic step, rather than compensated afterwards.
  *
- * KEYS: state hash, probe lock. ARGV: from, to, fence, ttl ms.
+ * KEYS: state hash, probe lock, announce channel. ARGV: from, to, fence, ttl ms.
  */
 export const COMPARE_AND_SET: ScriptDefinition = {
-  numberOfKeys: 2,
+  numberOfKeys: 3,
   lua: `
 local cur = redis.call('HMGET', KEYS[1], 'state', 'fence', 'openedAt')
 local state = cur[1]
@@ -131,6 +131,11 @@ end
 if to ~= 'half-open' then
   redis.call('DEL', KEYS[2])
 end
+
+-- Announced inside the same script as the swap, so a peer never hears about
+-- a transition that did not commit. Delivery is best effort by nature — a
+-- subscriber that missed it simply learns on its next read.
+redis.call('PUBLISH', KEYS[3], to .. ' ' .. nextFence .. ' ' .. nextOpenedAt)
 
 return { 1, to, tostring(nextFence), nextOpenedAt }
 `

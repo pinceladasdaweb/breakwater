@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import { createPolicyRegistry, policies } from '../src/registry/registry'
 import { compose } from '../src/compose/compose'
+import { resilience } from '../src/compose/resilience'
 import { retry } from '../src/retry/retry'
 import { timeout } from '../src/timeout/timeout'
 import { fixed } from '../src/retry/backoff'
@@ -263,6 +264,44 @@ describe('central configuration', () => {
     registry.defineAll({ a: {}, b: {} })
     registry.clear()
     assert.deepEqual(registry.names(), [])
+  })
+
+  test('delete and clear release what the registry built', () => {
+    const inner = memoryStore({ window: countWindow(10) })
+    let released = 0
+    const store: StateStore = { ...inner, subscribe: () => () => { released++ } }
+    const registry = createPolicyRegistry()
+
+    registry.define('api', { circuitBreaker: { name: 'api', stateStore: store } })
+    // The registry is the only handle on that breaker, so dropping the entry
+    // without releasing it would strand the subscription for good.
+    registry.delete('api')
+    assert.equal(released, 1)
+
+    registry.defineAll({
+      a: { circuitBreaker: { name: 'a', stateStore: store } },
+      b: { circuitBreaker: { name: 'b', stateStore: store } }
+    })
+    registry.clear()
+    assert.equal(released, 3)
+  })
+
+  test('a prebuilt policy is left alone — the caller still holds it', async () => {
+    const inner = memoryStore({ window: countWindow(10) })
+    let released = 0
+    const store: StateStore = { ...inner, subscribe: () => () => { released++ } }
+    const mine = resilience({ circuitBreaker: { name: 'mine', stateStore: store } })
+    const registry = createPolicyRegistry()
+
+    registry.define('api', mine)
+    registry.delete('api')
+    registry.define('again', mine)
+    registry.clear()
+
+    assert.equal(released, 0, 'tearing it down would break a caller still using it')
+    assert.equal(await mine.execute(() => 'ok'), 'ok')
+    mine.dispose()
+    assert.equal(released, 1)
   })
 })
 
