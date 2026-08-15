@@ -124,6 +124,20 @@ export interface StateStore {
    * per name and never forgets on its own — call this when a name retires.
    */
   delete?: (name: string) => void | Promise<void>
+  /**
+   * Optional: pushes transitions performed elsewhere, so an instance learns
+   * that a peer opened the circuit without waiting for its next read.
+   *
+   * The breaker subscribes once at construction and unsubscribes through
+   * the returned function when the policy is disposed. A push refreshes the
+   * mirror and nothing else — it announces no events, exactly as learning
+   * the same thing from a read does not, so a peer's transition is never
+   * counted twice across the fleet.
+   *
+   * Delivery is best effort by nature. The breaker never depends on a push
+   * arriving: every execution still reads the state it decides on.
+   */
+  subscribe?: (name: string, onChange: (snapshot: StateSnapshot) => void) => (() => void) | Promise<() => void>
 }
 
 export interface MemoryStoreOptions {

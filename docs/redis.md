@@ -72,6 +72,36 @@ The period's timing lives in Redis too, stamped from the **server clock**.
 That is what makes every instance agree on when probing may start — including
 one that joined after the trip and never saw it happen.
 
+## Pushed state changes
+
+By default an instance learns that a peer opened the circuit on its **next
+read**, which is the next call it makes. Give the store a subscription and it
+learns immediately instead:
+
+```ts
+import Redis from 'ioredis'
+import { fromIoredis, redisStore } from 'breakwater/redis'
+
+const client = new Redis(url)
+// A subscribed connection cannot run commands, so pushes need their own.
+const store = redisStore({ client: fromIoredis(client, client.duplicate()) })
+```
+
+The announcement is published by the same Lua script that commits the swap,
+so nobody hears about a transition that did not happen. A push refreshes the
+mirror and **emits no events** — learning it from a push is the same thing as
+learning it from a read, and emitting would count one fleet-wide transition
+once per instance that heard it.
+
+Pushes are a hint, never an authority: delivery is best effort, a message
+that describes a period the instance has already left is dropped, and every
+execution still reads the state it decides on. Losing one costs freshness,
+not correctness.
+
+Call `breaker.dispose()` to release the subscription when the policy goes
+away; it is safe to call more than once, and the breaker keeps working
+afterwards by going back to reading.
+
 ## Options
 
 ```ts
@@ -139,6 +169,43 @@ Three limits worth knowing before you rely on this in an incident:
   sweep uses the window of whoever is asking, so a peer configured with a
   shorter one will discard buckets the others were still counting. Change it
   fleet-wide, not per rollout.
+
+## Sharing the rate limit too
+
+The same idea, for quota: `limit` per `interval` for the **fleet** rather than
+per process.
+
+```ts
+import { rateLimit } from 'breakwater'
+import { redisRateLimit, fromIoredis } from 'breakwater/redis'
+
+const partner = rateLimit({
+  name: 'partner-api',      // the key the quota lives under — required
+  limit: 100,
+  interval: 60_000,
+  strategy: 'sliding-window',
+  store: redisRateLimit({ client: fromIoredis(client) })
+})
+```
+
+Both strategies keep the semantics of their in-process counterparts —
+continuous refill for the token bucket, exactness for the sliding window —
+and every decision is a single atomic script, because deciding and consuming
+in two steps is how two instances both spend the last slot.
+
+The degraded behavior is the one worth reading twice. **When Redis is
+unreachable the quota becomes local**, enforced by this instance alone with
+the same numbers. A fleet of N then allows up to N times the rate for the
+length of the outage. That is deliberate: the alternative is a rate limiter
+that rejects everything the moment its bookkeeping is unreachable, and a
+client-side quota exists to be polite to a dependency, not to be the reason
+your service stops. If the limit is a hard contractual ceiling rather than
+courtesy, keep the numbers well under it, or let the dependency's own
+enforcement be the authority it already is.
+
+`redisRateLimit` takes the same operational options as the state store —
+`prefix` (default `bwrl:`), `commandTimeoutMs`, `degradeForMs`, `onDegraded`,
+`onRecovered` — and answers `isDegraded()` the same way.
 
 ## What stays per-instance, on purpose
 

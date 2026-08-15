@@ -4,9 +4,10 @@ import assert from 'node:assert/strict'
 import Redis from 'ioredis'
 
 import { circuitBreaker } from '../src/circuit-breaker/circuit-breaker'
+import { rateLimit } from '../src/rate-limit/rate-limit'
 import { timeWindow } from '../src/circuit-breaker/window'
 import { isCircuitOpenError } from '../src/errors'
-import { fromIoredis, redisStore } from '../src/redis/index'
+import { fromIoredis, redisRateLimit, redisStore } from '../src/redis/index'
 
 /**
  * Runs against a real Redis, because the whole point of this store is the
@@ -189,6 +190,106 @@ describe('redisStore against a real Redis', { skip }, () => {
     // The other half of the bargain: a dynamic name that stops being used
     // must not sit in Redis forever.
     assert.equal(await client.exists('bw:{retired}'), 0)
+  })
+
+  test('a peer hears about a transition without waiting for its next read', async () => {
+    const subscriber = client.duplicate()
+    const pushed: Array<{ state: string, fence: number }> = []
+    const listening = redisStore({ client: fromIoredis(client, subscriber), window: timeWindow(1_000) })
+
+    const release = await listening.subscribe?.('pushed', (snapshot) => {
+      pushed.push({ state: snapshot.state, fence: snapshot.fence })
+    })
+
+    // A different instance moves the shared circuit.
+    const peer = store()
+    await peer.compareAndSet('pushed', 'closed', 'open', 0)
+    await peer.compareAndSet('pushed', 'open', 'half-open', 1)
+
+    await new Promise((resolve) => setTimeout(resolve, 150))
+
+    assert.deepEqual(pushed, [
+      { state: 'open', fence: 1 },
+      { state: 'half-open', fence: 2 }
+    ])
+
+    // And the announcement carries the period's timing, not just its name.
+    release?.()
+    await subscriber.quit()
+  })
+
+  test('a breaker learns a peer opened the circuit before its own next call', async () => {
+    const subscriber = client.duplicate()
+    const options = { consecutiveFailures: 1, halfOpenAfter: 60_000, name: 'live' } as const
+    const watcher = circuitBreaker({ ...options, stateStore: redisStore({ client: fromIoredis(client, subscriber), window: timeWindow(1_000) }) })
+    const peer = circuitBreaker({ ...options, stateStore: store() })
+
+    // The watcher has seen the circuit closed, and makes no further calls.
+    assert.equal(await watcher.execute(() => 'ok'), 'ok')
+    assert.equal(watcher.state, 'closed')
+
+    await assert.rejects(peer.execute(() => { throw new Error('down') }), /down/)
+    await new Promise((resolve) => setTimeout(resolve, 150))
+
+    // Without a push it would still believe the circuit is closed: nothing
+    // has asked Redis on this side since the peer tripped it.
+    assert.equal(watcher.state, 'open')
+
+    watcher.dispose()
+    await subscriber.quit()
+  })
+
+  test('the quota is the fleet\'s, not each instance\'s', async () => {
+    const quota = { limit: 5, interval: 10_000, strategy: 'sliding-window' as const, name: 'shared-quota' }
+    const a = rateLimit({ ...quota, store: redisRateLimit({ client: fromIoredis(client) }) })
+    const b = rateLimit({ ...quota, store: redisRateLimit({ client: fromIoredis(client) }) })
+
+    // Five admissions total, split across two instances — not five each.
+    const outcomes = []
+    for (let i = 0; i < 4; i++) {
+      outcomes.push(await a.execute(() => 'ok').then(() => 'ok', () => 'rejected'))
+      outcomes.push(await b.execute(() => 'ok').then(() => 'ok', () => 'rejected'))
+    }
+
+    assert.equal(outcomes.filter((o) => o === 'ok').length, 5)
+    assert.equal(outcomes.filter((o) => o === 'rejected').length, 3)
+  })
+
+  test('a rejection says how long until a slot frees, from the shared window', async () => {
+    const limiter = rateLimit({
+      limit: 1,
+      interval: 1_000,
+      strategy: 'sliding-window',
+      name: 'retry-after',
+      store: redisRateLimit({ client: fromIoredis(client) })
+    })
+
+    await limiter.execute(() => 'ok')
+    await assert.rejects(limiter.execute(() => 'ok'), (error: unknown) => {
+      const rejected = error as { code: string, retryAfterMs: number }
+      assert.equal(rejected.code, 'RATE_LIMITED')
+      assert.ok(rejected.retryAfterMs > 0 && rejected.retryAfterMs <= 1_000, `retryAfterMs was ${rejected.retryAfterMs}`)
+      return true
+    })
+
+    // And the window really is a window: the slot frees on its own.
+    await new Promise((resolve) => setTimeout(resolve, 1_050))
+    assert.equal(await limiter.execute(() => 'ok'), 'ok')
+  })
+
+  test('the token bucket refills continuously across instances', async () => {
+    const quota = { limit: 10, interval: 1_000, strategy: 'token-bucket' as const, burst: 2, name: 'bucket' }
+    const a = rateLimit({ ...quota, store: redisRateLimit({ client: fromIoredis(client) }) })
+    const b = rateLimit({ ...quota, store: redisRateLimit({ client: fromIoredis(client) }) })
+
+    // The burst is shared: two admissions, then the third waits.
+    assert.equal(await a.execute(() => 'ok'), 'ok')
+    assert.equal(await b.execute(() => 'ok'), 'ok')
+    await assert.rejects(a.execute(() => 'ok'))
+
+    // 10/second means a token roughly every 100ms, minted for whoever asks.
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    assert.equal(await b.execute(() => 'ok'), 'ok')
   })
 
   test('delete drops every key the name owns', async () => {

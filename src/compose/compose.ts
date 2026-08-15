@@ -7,6 +7,11 @@ export interface ComposedStatsEntry {
   stats: unknown
 }
 
+/** A policy that holds something releasable — a subscription, a timer. */
+interface Disposable {
+  dispose?: () => void
+}
+
 export interface ComposedPolicy extends Policy {
   readonly kind: 'compose'
   /** The composed policies, outermost first. */
@@ -16,6 +21,16 @@ export interface ComposedPolicy extends Policy {
    * nested compositions flattened. Policies without stats() are skipped.
    */
   stats: () => ComposedStatsEntry[]
+  /**
+   * Releases what the composed policies hold — a circuit breaker's state
+   * store subscription, today. Reaches nested compositions, skips policies
+   * with nothing to release, and is safe to call more than once.
+   *
+   * Without it the only handle on a breaker built through `resilience()` or
+   * the registry would be the composition itself, and its subscription could
+   * never be let go.
+   */
+  dispose: () => void
 }
 
 /**
@@ -51,5 +66,12 @@ export function compose (...policies: Policy[]): ComposedPolicy {
 
   // A frozen copy: the exposed list can never rewrite the invoke chain,
   // which closes over the private rest-parameter array.
-  return { ...base, kind: 'compose' as const, policies: Object.freeze([...policies]), stats }
+  const dispose = (): void => {
+    for (const policy of policies) {
+      const releasable = policy as Disposable
+      if (typeof releasable.dispose === 'function') releasable.dispose()
+    }
+  }
+
+  return { ...base, kind: 'compose' as const, policies: Object.freeze([...policies]), stats, dispose }
 }

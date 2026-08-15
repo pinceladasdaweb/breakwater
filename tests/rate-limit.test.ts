@@ -307,3 +307,107 @@ describe('behavior as a policy', () => {
     assert.equal(events[0]?.retryAfterMs, 1_000)
   })
 })
+
+describe('a shared quota', () => {
+  test('a store decides admission, and stats() reports what it left', async () => {
+    const decisions = [
+      { admitted: true, retryAfterMs: 0, remaining: 2 },
+      { admitted: false, retryAfterMs: 250, remaining: 0 }
+    ]
+    const asked: Array<{ name: string, quota: unknown }> = []
+    const limiter = rateLimit({
+      limit: 10,
+      interval: 1_000,
+      burst: 3,
+      name: 'partner-api',
+      store: {
+        acquire: (name, quota) => {
+          asked.push({ name, quota })
+          return decisions.shift() as { admitted: boolean, retryAfterMs: number, remaining: number }
+        }
+      }
+    })
+
+    assert.equal(limiter.stats().remaining, 3, 'the burst, before the fleet has said anything')
+
+    assert.equal(await limiter.execute(() => 'ok'), 'ok')
+    assert.equal(limiter.stats().remaining, 2)
+
+    await assert.rejects(limiter.execute(() => 'ok'), (error: unknown) => {
+      const rejected = error as { code: string, retryAfterMs: number }
+      assert.equal(rejected.code, 'RATE_LIMITED')
+      assert.equal(rejected.retryAfterMs, 250)
+      return true
+    })
+    assert.equal(limiter.stats().remaining, 0)
+
+    // The quota travels with the call, so the store can never hold a
+    // different limit than the policy was configured with.
+    assert.deepEqual(asked[0], {
+      name: 'partner-api',
+      quota: { limit: 10, interval: 1_000, strategy: 'token-bucket', burst: 3 }
+    })
+  })
+
+  test('a rejection always carries a wait, even from a store that reports none', async () => {
+    const limiter = rateLimit({
+      limit: 1,
+      interval: 1_000,
+      name: 'api',
+      store: { acquire: () => ({ admitted: false, retryAfterMs: 0, remaining: 0 }) }
+    })
+
+    // "Rejected, try again in zero milliseconds" is not an instruction
+    // anybody can follow — a caller backing off needs a real number.
+    await assert.rejects(limiter.execute(() => 'ok'), (error: unknown) => {
+      assert.ok((error as { retryAfterMs: number }).retryAfterMs >= 1)
+      return true
+    })
+  })
+
+  test('an async store is awaited before the call is admitted', async () => {
+    let admitted = false
+    const limiter = rateLimit({
+      limit: 1,
+      interval: 1_000,
+      name: 'api',
+      store: {
+        acquire: async () => {
+          await new Promise((resolve) => setImmediate(resolve))
+          admitted = true
+          return { admitted: true, retryAfterMs: 0, remaining: 0 }
+        }
+      }
+    })
+
+    assert.equal(await limiter.execute(() => {
+      assert.equal(admitted, true, 'the quota decides before the function runs')
+      return 'ok'
+    }), 'ok')
+  })
+
+  test('a shared quota without a name is refused at construction', () => {
+    const store = { acquire: () => ({ admitted: true, retryAfterMs: 0, remaining: 1 }) }
+    assert.throws(() => rateLimit({ limit: 1, interval: 1_000, store }), { name: 'RangeError', message: /stable name/ })
+    assert.throws(() => rateLimit({ limit: 1, interval: 1_000, name: '', store }), { name: 'RangeError', message: /stable name/ })
+  })
+
+  test('the sliding window strategy reaches the store as itself', async () => {
+    let seen: string | undefined
+    const limiter = rateLimit({
+      limit: 1,
+      interval: 1_000,
+      strategy: 'sliding-window',
+      name: 'api',
+      store: {
+        acquire: (_name, quota) => {
+          seen = quota.strategy
+          return { admitted: true, retryAfterMs: 0, remaining: 0 }
+        }
+      }
+    })
+
+    await limiter.execute(() => 'ok')
+    assert.equal(seen, 'sliding-window')
+  })
+})
