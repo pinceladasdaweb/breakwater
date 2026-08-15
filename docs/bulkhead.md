@@ -108,6 +108,7 @@ app.post('/reports', async (req, res) => {
   `timeout` when queue wait must be bounded.
 - **Per-instance, in-memory.** Ten service instances with `concurrency: 20`
   allow 200 concurrent calls overall. A distributed limit belongs to the
-  planned Redis-backed tooling.
+  planned distributed tooling — `breakwater/redis` shares the circuit
+  breaker's state, not a concurrency limit.
 - **One bulkhead per resource, not per call site.** Sharing an instance is
   the whole point — create it once and reuse it.

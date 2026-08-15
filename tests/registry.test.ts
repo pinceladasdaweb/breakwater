@@ -153,7 +153,7 @@ describe('naming rules', () => {
     const keys = new Set<string>()
     const store: StateStore = {
       ...inner,
-      getState: (name) => { keys.add(name); return inner.getState(name) }
+      readState: (name) => { keys.add(name); return inner.readState(name) }
     }
 
     registry.define('orders-api', { circuitBreaker: { consecutiveFailures: 1, stateStore: store } })

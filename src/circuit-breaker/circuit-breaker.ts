@@ -5,7 +5,7 @@ import { basePolicy, type Policy } from '../policy'
 import { CircuitOpenError, IsolatedError } from '../errors'
 import { assertPositiveFinite, assertPositiveInt } from '../validate'
 import { createEmitter, withObservable, type Observable } from '../events'
-import { memoryStore, type BreakerState, type LatencyStats, type StateStore, type WindowCounters } from './state-store'
+import { memoryStore, type BreakerState, type LatencyStats, type StateSnapshot, type StateStore, type WindowCounters } from './state-store'
 
 export interface CircuitBreakerStats {
   state: BreakerState
@@ -113,6 +113,16 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
   const failureIf = options.failureIf ?? (() => true)
   const name = options.name ?? `breaker-${randomUUID()}`
   const store = options.stateStore ?? memoryStore({ window: options.window })
+  // Guarded here rather than at the first execution: a store missing the
+  // fenced pair is a wiring mistake, and finding out mid-request — in
+  // production, inside a policy — is the worst possible moment. TypeScript
+  // cannot guard it for JavaScript callers, nor for anyone upgrading a
+  // store written against the previous getState/transition contract.
+  const required = ['readState', 'compareAndSet', 'recordSuccess', 'recordFailure', 'getCounters', 'resetCounters', 'acquireProbe'] as const
+  const missing = required.filter((method) => typeof store[method] !== 'function')
+  if (missing.length > 0) {
+    throw new TypeError(`stateStore for breaker "${name}" is missing ${missing.join(', ')} — a store written against the previous getState/transition contract needs updating to readState and compareAndSet`)
+  }
   const successesToClose = Math.floor(halfOpenCalls / 2) + 1
 
   const emitter = createEmitter<CircuitBreakerEvents>()
@@ -127,15 +137,16 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
   let consecutive = 0
   let probeSuccesses = 0
   let probesInFlight = 0
-  // Incremented on every entry into half-open. Probes carry the generation
-  // they were admitted under; results and slot releases from a previous
-  // generation (a probe still in flight when the circuit re-opened) are
-  // ignored so they cannot close, reopen or unblock the current period.
-  let probeGeneration = 0
+  // The period the mirrors above describe. Probes carry the fence they were
+  // admitted under; results and slot releases from a period that has since
+  // ended are ignored so they cannot close, reopen or unblock the current
+  // one — and the same fence goes into every swap, so the store rejects a
+  // stale decision even when it was this process that fell behind.
+  let currentFence = 0
 
   // Bookkeeping must never change an execution's outcome or crash the
   // process: a store that fails to RECORD degrades to last-known values,
-  // unlike the admission decisions (getState/transition/acquireProbe),
+  // unlike the admission decisions (readState/compareAndSet/acquireProbe),
   // whose errors do propagate — a breaker that cannot decide must not admit.
   const reportStoreError = (error: unknown): void => {
     console.error('breakwater: circuit breaker state store threw', error)
@@ -161,6 +172,10 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
   // and a slow old read must not overwrite the mirror a newer one just fed.
   let countersReadSeq = 0
   let latencyReadSeq = 0
+  // The same guard for the state mirror. A compare-and-set outcome needs no
+  // token: it reports the store as of the moment it ran, so it always wins.
+  let observeSeq = 0
+  let adoptedSeq = 0
 
   const syncCounters = (): void => {
     try {
@@ -205,8 +220,47 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
     return lastLatency === undefined ? current : { ...current, latency: lastLatency }
   }
 
+  /**
+   * Refreshes the mirrors from a snapshot the store just handed us — the
+   * single place the local view of the circuit moves.
+   *
+   * Two rules earn their keep with a shared store. The probe bookkeeping is
+   * scoped to a period, so an unseen fence starts it over: the period may
+   * have been opened by a peer we never watched transition, and counters
+   * from the previous one would block or close the new one. And a store
+   * that does not report the period's timing leaves ours alone: the
+   * cooldown is then counted from first observation, and clobbering it on
+   * every read would push the probe moment forever out of reach.
+   */
+  const adopt = (snapshot: StateSnapshot, seq: number = ++observeSeq): void => {
+    // A snapshot read before another one can still land after it. Adopting it
+    // would rewind the mirror to a period we already left — zeroing the probe
+    // bookkeeping of the CURRENT period, whose in-flight probes then release
+    // a slot nobody was holding. The token is taken at dispatch, so age is
+    // decided by when the read started, not by when it happened to return.
+    if (seq < adoptedSeq) return
+    adoptedSeq = seq
+
+    if (snapshot.fence !== currentFence) {
+      currentFence = snapshot.fence
+      probeSuccesses = 0
+      probesInFlight = 0
+    }
+    localState = snapshot.state
+    if (snapshot.openedAt !== undefined) openedAt = snapshot.openedAt
+    else if (snapshot.state !== 'open' && snapshot.state !== 'half-open') openedAt = undefined
+  }
+
+  /** Reads the circuit and refreshes the mirrors, ageing the read honestly. */
+  const observe = async (): Promise<StateSnapshot> => {
+    const seq = ++observeSeq
+    const snapshot = await store.readState(name)
+    adopt(snapshot, seq)
+    return snapshot
+  }
+
+  /** Announces a transition that has already been committed and adopted. */
   const changeState = (from: BreakerState, to: BreakerState, correlationId?: string): void => {
-    localState = to
     const snapshot = stats()
     if (to === 'open') emitter.emit('open', { stats: snapshot, correlationId })
     else if (to === 'closed') emitter.emit('close', { stats: snapshot, correlationId })
@@ -214,21 +268,24 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
     emitter.emit('stateChange', { from, to, stats: snapshot, correlationId })
   }
 
-  const trip = async (from: BreakerState, correlationId?: string, guardGen?: number): Promise<void> => {
-    if (await store.transition(name, from, 'open')) {
-      if (guardGen !== undefined && guardGen !== probeGeneration) {
-        // The half-open period this failure belonged to ended while the CAS
-        // travelled: the trip landed on a FRESH period. Hand the state back
-        // — best effort until stores can fence the CAS with a generation.
-        await store.transition(name, 'open', from)
-        return
-      }
-      openedAt = Date.now()
-      consecutive = 0
-      changeState(from, 'open', correlationId)
-    } else {
-      localState = await store.getState(name)
-    }
+  /**
+   * Opens the circuit against the period `fence` identifies. A swap that
+   * travelled while the world moved on simply loses — the store rejects it,
+   * so a failure from a dead period can no longer reopen a fresh one.
+   */
+  const trip = async (from: BreakerState, fence: number, correlationId?: string): Promise<void> => {
+    const outcome = await store.compareAndSet(name, from, 'open', fence)
+    // The outcome carries where the circuit is now either way, so a lost
+    // race refreshes the mirror without a second round trip.
+    adopt(outcome.snapshot)
+    if (!outcome.ok) return
+    // A store that does not report the period's timing leaves adopt() holding
+    // the PREVIOUS open period's stamp — which would put nextAttemptAt in the
+    // past and admit every later call as a probe, forever. This period began
+    // now.
+    if (outcome.snapshot.openedAt === undefined) openedAt = Date.now()
+    consecutive = 0
+    changeState(from, 'open', correlationId)
   }
 
   const rejectFast = (reason: 'circuit_open' | 'isolated', correlationId: string): never => {
@@ -236,7 +293,7 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
     throw reason === 'isolated' ? new IsolatedError() : new CircuitOpenError(snapshot())
   }
 
-  const onSuccess = async (wasProbe: boolean, probeGen: number, durationMs: number, correlationId: string): Promise<void> => {
+  const onSuccess = async (wasProbe: boolean, probeFence: number, durationMs: number, correlationId: string): Promise<void> => {
     try {
       await store.recordSuccess(name, durationMs)
     } catch (error) {
@@ -246,41 +303,34 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
     syncCounters()
     emitter.emit('success', { durationMs, correlationId })
 
-    // The generation is re-checked HERE, after the store write: with an
-    // async store the write can outlive the half-open period it belongs to,
-    // and a stale success must not count towards the current one's majority.
-    if (wasProbe && probeGen === probeGeneration) {
-      probeSuccesses++
-      if (probeSuccesses >= successesToClose) {
-        try {
-          if (await store.transition(name, 'half-open', 'closed')) {
-            if (probeGen !== probeGeneration) {
-              // The period flipped while the CAS travelled: this close
-              // belongs to a dead period and just closed a fresh one. Hand
-              // the state back — best effort until stores can fence the CAS.
-              await store.transition(name, 'closed', 'half-open')
-              return
-            }
-            // The close is committed: announce it no matter what the
-            // bookkeeping below does.
-            try {
-              await store.resetCounters(name)
-            } catch (error) {
-              reportStoreError(error)
-            }
-            openedAt = undefined
-            changeState('half-open', 'closed', correlationId)
-          }
-        } catch (error) {
-          // Closing is retried by the next probe; staying half-open is the
-          // safe degradation when the store cannot answer.
-          reportStoreError(error)
-        }
+    // The fence is re-checked HERE, after the store write: with an async
+    // store the write can outlive the half-open period it belongs to, and a
+    // stale success must not count towards the current one's majority.
+    if (!wasProbe || probeFence !== currentFence) return
+
+    probeSuccesses++
+    if (probeSuccesses < successesToClose) return
+
+    try {
+      const outcome = await store.compareAndSet(name, 'half-open', 'closed', probeFence)
+      adopt(outcome.snapshot)
+      if (!outcome.ok) return
+      // The close is committed: announce it no matter what the bookkeeping
+      // below does.
+      try {
+        await store.resetCounters(name)
+      } catch (error) {
+        reportStoreError(error)
       }
+      changeState('half-open', 'closed', correlationId)
+    } catch (error) {
+      // Closing is retried by the next probe; staying half-open is the
+      // safe degradation when the store cannot answer.
+      reportStoreError(error)
     }
   }
 
-  const onFailure = async (stateAtEntry: BreakerState, probeGen: number, error: unknown, durationMs: number, correlationId: string): Promise<void> => {
+  const onFailure = async (stateAtEntry: BreakerState, probeFence: number, error: unknown, durationMs: number, correlationId: string): Promise<void> => {
     try {
       await store.recordFailure(name, durationMs)
       lastError = error
@@ -295,20 +345,21 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
       if (stateAtEntry === 'half-open') {
         // Re-checked after the awaits: a failure from a stale probe belongs
         // to an aborted period and must not reopen the circuit the current
-        // period is recovering. The guardGen covers the remaining window —
-        // the CAS itself travelling while the period flips.
-        if (probeGen === probeGeneration) await trip('half-open', correlationId, probeGen)
+        // period is recovering. Carrying the same fence into the swap closes
+        // the remaining window — the CAS itself travelling while the period
+        // flips — because the store refuses it outright.
+        if (probeFence === currentFence) await trip('half-open', probeFence, correlationId)
         return
       }
 
       if (consecutiveFailures !== undefined) {
         consecutive++
-        if (consecutive >= consecutiveFailures) await trip('closed', correlationId)
+        if (consecutive >= consecutiveFailures) await trip('closed', currentFence, correlationId)
         return
       }
 
       if (lastCounters.totalCalls >= minimumCalls && lastCounters.failureRate >= failureThreshold) {
-        await trip('closed', correlationId)
+        await trip('closed', currentFence, correlationId)
       }
     } catch (storeError) {
       // A store that cannot execute the trip leaves the local mirror as-is;
@@ -320,33 +371,35 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
   const base = basePolicy(async (fn, ctx) => {
     ctx.signal.throwIfAborted()
 
-    let state = await store.getState(name)
-    localState = state
+    const entry = await observe()
+    let state = entry.state
 
     if (state === 'isolated') rejectFast('isolated', ctx.correlationId)
 
     if (state === 'open' && openedAt === undefined) {
-      // Another instance sharing the store tripped the circuit; we never saw
-      // the trip, so start the cooldown from first observation. A distributed
-      // store may later own openedAt to share the exact timing.
+      // A peer sharing the store tripped the circuit and the store does not
+      // report the period's timing: start the cooldown from first
+      // observation. A store that owns `openedAt` shares the exact moment,
+      // and then every instance agrees on when probing may start.
       openedAt = Date.now()
     }
 
     if (state === 'open') {
       const probeAt = nextAttemptAt()
       const probeAllowed = probeAt !== undefined && Date.now() >= probeAt
-      if (probeAllowed && await store.transition(name, 'open', 'half-open')) {
-        probeGeneration++
-        probeSuccesses = 0
-        probesInFlight = 0
-        changeState('open', 'half-open', ctx.correlationId)
-        state = 'half-open'
-      } else {
-        rejectFast('circuit_open', ctx.correlationId)
-      }
+      if (!probeAllowed) rejectFast('circuit_open', ctx.correlationId)
+
+      const outcome = await store.compareAndSet(name, 'open', 'half-open', entry.fence)
+      adopt(outcome.snapshot)
+      if (!outcome.ok) rejectFast('circuit_open', ctx.correlationId)
+      state = 'half-open'
+      changeState('open', 'half-open', ctx.correlationId)
     }
 
-    let probeGen = 0
+    // The period this execution belongs to: results arriving after it ended
+    // are ignored rather than credited to whatever period is current.
+    const probeFence = currentFence
+
     if (state === 'half-open') {
       // Check and reserve the slot synchronously — an await between the two
       // would let N concurrent callers all read the same stale count.
@@ -354,13 +407,12 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
         rejectFast('circuit_open', ctx.correlationId)
       }
       probesInFlight++
-      probeGen = probeGeneration
 
       let admitted = false
       try {
         admitted = await store.acquireProbe(name)
       } finally {
-        if (!admitted && probeGen === probeGeneration) probesInFlight--
+        if (!admitted && probeFence === currentFence) probesInFlight--
       }
       if (!admitted) rejectFast('circuit_open', ctx.correlationId)
     }
@@ -369,17 +421,17 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
 
     try {
       const result = await fn(ctx)
-      await onSuccess(state === 'half-open', probeGen, Date.now() - started, ctx.correlationId)
+      await onSuccess(state === 'half-open', probeFence, Date.now() - started, ctx.correlationId)
       return result
     } catch (error) {
       // Cancellations and ignored errors count as neither success nor failure.
       if (!ctx.signal.aborted && failureIf(error)) {
-        await onFailure(state, probeGen, error, Date.now() - started, ctx.correlationId)
+        await onFailure(state, probeFence, error, Date.now() - started, ctx.correlationId)
       }
       throw error
     } finally {
       // A stale probe's slot belongs to a period that no longer exists.
-      if (state === 'half-open' && probeGen === probeGeneration) probesInFlight--
+      if (state === 'half-open' && probeFence === currentFence) probesInFlight--
     }
   })
 
@@ -393,13 +445,13 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
 
     async isolate () {
       for (let i = 0; i < 4; i++) {
-        const current = await store.getState(name)
-        if (current === 'isolated') {
-          localState = 'isolated'
-          return
-        }
-        if (await store.transition(name, current, 'isolated')) {
-          changeState(current, 'isolated')
+        const current = await observe()
+        if (current.state === 'isolated') return
+
+        const outcome = await store.compareAndSet(name, current.state, 'isolated', current.fence)
+        adopt(outcome.snapshot)
+        if (outcome.ok) {
+          changeState(current.state, 'isolated')
           return
         }
       }
@@ -407,19 +459,23 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
     },
 
     async unisolate () {
-      if (await store.transition(name, 'isolated', 'closed')) {
-        // The transition is committed: the caller must see it announced even
-        // if the counter cleanup fails (contained like any bookkeeping).
-        try {
-          await store.resetCounters(name)
-        } catch (error) {
-          reportStoreError(error)
-        }
-        consecutive = 0
-        openedAt = undefined
-        lastError = undefined
-        changeState('isolated', 'closed')
+      const current = await observe()
+      if (current.state !== 'isolated') return
+
+      const outcome = await store.compareAndSet(name, 'isolated', 'closed', current.fence)
+      adopt(outcome.snapshot)
+      if (!outcome.ok) return
+
+      // The transition is committed: the caller must see it announced even
+      // if the counter cleanup fails (contained like any bookkeeping).
+      try {
+        await store.resetCounters(name)
+      } catch (error) {
+        reportStoreError(error)
       }
+      consecutive = 0
+      lastError = undefined
+      changeState('isolated', 'closed')
     },
 
     async reset () {
@@ -431,13 +487,14 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
       consecutive = 0
       probeSuccesses = 0
       lastError = undefined
-      const current = await store.getState(name)
-      localState = current
+
+      const current = await observe()
       // Isolation is deliberate and only unisolate() leaves it: reset clears
       // the counters but never un-isolates.
-      if (current !== 'closed' && current !== 'isolated' && await store.transition(name, current, 'closed')) {
-        openedAt = undefined
-        changeState(current, 'closed')
+      if (current.state !== 'closed' && current.state !== 'isolated') {
+        const outcome = await store.compareAndSet(name, current.state, 'closed', current.fence)
+        adopt(outcome.snapshot)
+        if (outcome.ok) changeState(current.state, 'closed')
       }
       syncCounters()
     }

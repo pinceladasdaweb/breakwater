@@ -190,9 +190,9 @@ for manual `isolate()`/`unisolate()`/`reset()`).
 
 ## Pluggable state: `StateStore`
 
-The breaker keeps its state behind an interface so it can be shared — the
-upcoming Redis store will let N instances of your service agree that an
-endpoint is down (only one instance probes it, the rest wait):
+The breaker keeps its state behind an interface so it can be shared.
+[`breakwater/redis`](redis.md) lets N instances of your service agree that an
+endpoint is down — only one instance probes it, the rest wait:
 
 ```ts
 import { memoryStore, countWindow } from 'breakwater'
@@ -205,7 +205,84 @@ const b = circuitBreaker({ name: 'payments', stateStore: store })
 
 With a custom store, the store owns the counter aggregation (the breaker's
 `window` option is ignored) and a stable `name` is required. Every `StateStore`
-method may be sync or async; `transition` must be an atomic compare-and-set.
+method may be sync or async — the breaker awaits unconditionally.
+
+### The fenced pair
+
+The circuit is read and moved through exactly two methods, and they are the
+reason a shared store can be correct:
+
+```ts
+readState(name): StateSnapshot          // { state, fence, openedAt? }
+compareAndSet(name, from, to, fence): CasOutcome   // { ok, snapshot }
+```
+
+The **fence** is a token the store mints on every successful transition. It
+identifies the state *period*, not the state name — `half-open → closed →
+open → half-open` ends up spelling "half-open" again, but it is a different
+period. `compareAndSet` may swap only if the circuit is still in `from`
+**and** nothing has transitioned since the caller read that fence.
+
+That is what makes a decision taken before an `await` unable to land after
+the world moved on. A probe that fails, waits on a slow round trip, and only
+then tries to reopen the circuit will find its fence stale — and be refused —
+instead of killing the recovery period that started meanwhile. There is
+deliberately no unfenced shortcut in the interface: a store cannot
+accidentally offer a weaker swap than the breaker relies on.
+
+`CasOutcome.snapshot` always says where the circuit is now — the freshly
+minted period when `ok`, the period that won the race when not — so losing a
+race costs no extra round trip.
+
+The store also owns the period's timing: `openedAt` is stamped when the
+circuit enters `open`, carried through `half-open` (the probing belongs to
+the same period), and cleared otherwise. That is how N instances agree on
+when probing may start. A store that leaves it out still works — each
+instance then counts the cooldown from the moment it first *observed* the
+open circuit.
+
+The state half of a custom store is about fifteen lines (the counter half —
+`recordSuccess`, `recordFailure`, `getCounters`, `resetCounters` and
+`acquireProbe` — is whatever your backend makes natural):
+
+```ts
+import type { StateSnapshot, StateStore } from 'breakwater'
+
+const state = new Map<string, StateSnapshot>()
+const read = (name: string): StateSnapshot => state.get(name) ?? { state: 'closed', fence: 0 }
+
+const stateHalf: Pick<StateStore, 'readState' | 'compareAndSet'> = {
+  readState: read,
+  compareAndSet (name, from, to, fence) {
+    const current = read(name)
+    if (current.state !== from || current.fence !== fence) return { ok: false, snapshot: current }
+    const next: StateSnapshot = {
+      state: to,
+      fence: current.fence + 1,
+      openedAt: to === 'open' ? Date.now() : to === 'half-open' ? current.openedAt : undefined
+    }
+    state.set(name, next)
+    return { ok: true, snapshot: next }
+  }
+}
+```
+
+### Migrating from `getState` / `transition`
+
+A store written before the fenced pair implemented two methods that no longer
+exist:
+
+| Was | Now |
+|---|---|
+| `getState(name) => BreakerState` | `readState(name) => { state, fence, openedAt? }` |
+| `transition(name, from, to) => boolean` | `compareAndSet(name, from, to, fence) => { ok, snapshot }` |
+
+The swap folds the read, the compare and the fence check into one atomic
+step, and hands back where the circuit ended up — so a lost race costs no
+extra round trip, and a decision taken before an `await` can no longer land
+after the circuit moved on. Passing a store that still has the old shape
+throws at construction, naming both methods, rather than failing on the first
+request in production.
 
 `getLatency` is the one optional method that adds data: implement it to have
 durations show up in `stats()`, or leave it out and everything else keeps
@@ -216,7 +293,7 @@ that a breaker created **without** a `name` gets a random one, so never
 create anonymous breakers against a shared store.
 
 Errors are contained by role and by moment: while the breaker is *deciding*
-an admission (`getState`, `transition`, `acquireProbe` on the way in) or
+an admission (`readState`, `compareAndSet`, `acquireProbe` on the way in) or
 serving a manual control call, a store throw propagates — a breaker that
 cannot decide must not admit. Once an execution has *settled*, every store
 error — bookkeeping writes, counter reads, even the trip/close transitions —

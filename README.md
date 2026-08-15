@@ -6,8 +6,6 @@
 [![npm version](https://img.shields.io/npm/v/breakwater.svg)](https://www.npmjs.com/package/breakwater)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-> ⚠️ **Work in progress** — the public API is being built towards `1.0.0` and may change without notice until then.
-
 When waves of failure hit, the breakwater keeps your service standing. It brings the design of [resilience4j](https://resilience4j.readme.io/) (Java) and [Polly](https://github.com/App-vNext/Polly) (.NET) to Node.js: composable resilience policies with explicit ordering, typed events, and metrics — no third-party plugins required.
 
 ```ts
@@ -50,14 +48,14 @@ const charge = await payments.execute(({ signal }) => api.post('/charge', body, 
 | Named policy registry (central config) | ✅ | ❌ | ❌ |
 | Typed events + pluggable metrics collector | ✅ native | ➖ via plugin | ❌ |
 | Prometheus / OpenTelemetry adapters | ✅ [`/prometheus`](docs/prometheus.md) · [`/otel`](docs/otel.md) | ➖ via plugin | ❌ |
-| Distributed circuit breaker state (Redis) | 🔜 planned | ❌ | ❌ |
+| Distributed circuit breaker state (Redis) | ✅ [`/redis`](docs/redis.md) | ❌ | ❌ |
 | TypeScript | ✅ native | ➖ via `@types` | ✅ native |
 | Runtime dependencies | **0** | 0 | 0 |
 
 Design principles:
 
 - **TypeScript first** — strict types, no `@types` package
-- **Zero dependencies in the core** — integrations ship as optional entry points (Prometheus and OpenTelemetry today, Redis planned)
+- **Zero dependencies in the core** — integrations ship as optional entry points (Prometheus, OpenTelemetry and Redis)
 - **Declarative composition** — policies combine into pipelines with explicit, documented ordering
 - **Native observability** — typed events and a pluggable `MetricsCollector` in the core
 
@@ -323,7 +321,9 @@ See [docs/errors.md](docs/errors.md).
 - [Observability: events, stats & metrics](docs/observability.md)
 - [Prometheus adapter](docs/prometheus.md) — ready-made prom-client collectors + a Grafana dashboard
 - [OpenTelemetry adapter](docs/otel.md) — OTel metrics + spans as a composable policy
+- [Redis: the distributed circuit breaker](docs/redis.md) — one circuit shared across every instance
 - [Errors](docs/errors.md)
+- [Versioning policy](docs/versioning.md) — what the semver promise covers, and what it deliberately does not
 
 ## Requirements
 

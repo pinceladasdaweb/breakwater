@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Demo service: breakwater policies under a scripted outage, scraped by Prometheus.",
   "dependencies": {
-    "breakwater": "^0.9.0",
+    "breakwater": "^1.0.0",
     "prom-client": "^15.1.3"
   }
 }

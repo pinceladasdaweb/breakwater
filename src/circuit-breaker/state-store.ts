@@ -29,27 +29,76 @@ export interface LatencyStats {
 }
 
 /**
+ * The state of a circuit at one instant, with the token that identifies
+ * the period it belongs to.
+ */
+export interface StateSnapshot {
+  state: BreakerState
+  /**
+   * Monotonic token minted by every successful transition. It identifies
+   * the current state PERIOD: a decision taken while the fence was `f` is
+   * provably stale once the store's fence has moved past it, even if the
+   * state name happens to look the same (half-open → closed → open →
+   * half-open is a different period, not the same one).
+   *
+   * A store must never reuse a fence for a given name — including across a
+   * `delete()`, or across a key expiring and being recreated. Reuse brings
+   * back the very ambiguity the token exists to remove.
+   */
+  fence: number
+  /**
+   * Epoch ms the current open period began. Set when the circuit opens,
+   * carried through half-open (the probing belongs to the same period),
+   * absent while closed or isolated.
+   */
+  openedAt?: number
+}
+
+/** The result of a fenced compare-and-set: did it swap, and where is the world now. */
+export interface CasOutcome {
+  ok: boolean
+  /**
+   * The store's state after the attempt — the freshly minted period when
+   * `ok`, the period that beat this caller when not. Either way the
+   * breaker can refresh its mirror without a second round trip.
+   */
+  snapshot: StateSnapshot
+}
+
+/**
  * Pluggable backend for the circuit breaker state. The in-memory
  * implementation below is the default; a Redis-backed one shares the state
  * across instances.
  *
  * Every method may return synchronously or a promise — the breaker awaits
  * unconditionally. Rules for distributed adapters:
- * - `transition` must be atomic (compare-and-set).
+ * - Reading and swapping go through the fenced pair below, and there is no
+ *   unfenced shortcut: a store cannot accidentally offer a weaker swap than
+ *   the breaker relies on.
  * - Graceful degradation is the adapter's job: if the backend is down, the
  *   adapter answers from its local cache. The breaker never needs to know.
  * - Errors are contained by role and by moment. While the breaker is
- *   DECIDING an admission (`getState`, `transition`, `acquireProbe` on the
- *   way in) or serving a manual control call, a throw propagates to the
+ *   DECIDING an admission (`readState`, `compareAndSet`, `acquireProbe` on
+ *   the way in) or serving a manual control call, a throw propagates to the
  *   caller — a breaker that cannot decide must not admit. Once an execution
  *   has SETTLED, every store error — bookkeeping writes, counter reads,
  *   even the trip/close transitions — is reported and contained: the
  *   caller's outcome is already decided and no store failure may rewrite it.
  */
 export interface StateStore {
-  getState: (name: string) => BreakerState | Promise<BreakerState>
-  /** Atomic compare-and-set; returns false when the current state is not `from`. */
-  transition: (name: string, from: BreakerState, to: BreakerState) => boolean | Promise<boolean>
+  /** State, fence and open timing in a single read. */
+  readState: (name: string) => StateSnapshot | Promise<StateSnapshot>
+  /**
+   * Atomic compare-and-set on BOTH the state and the fence: it may swap
+   * only if the circuit is still in `from` AND nothing has transitioned
+   * since the caller read `fence`. This is what makes a decision taken
+   * before an await unable to land after the world moved on.
+   *
+   * On success the store mints a new fence and stamps the period's
+   * `openedAt` (set when entering `open`, carried into `half-open`, cleared
+   * otherwise). Never throws to signal a lost race — that is `ok: false`.
+   */
+  compareAndSet: (name: string, from: BreakerState, to: BreakerState, fence: number) => CasOutcome | Promise<CasOutcome>
   recordSuccess: (name: string, durationMs: number) => void | Promise<void>
   recordFailure: (name: string, durationMs: number) => void | Promise<void>
   getCounters: (name: string) => WindowCounters | Promise<WindowCounters>
@@ -75,13 +124,22 @@ export interface StateStore {
    * per name and never forgets on its own — call this when a name retires.
    */
   delete?: (name: string) => void | Promise<void>
-  /** Distributed only: push state changes to other instances. */
-  subscribe?: (name: string, onChange: (state: BreakerState) => void) => () => void
 }
 
 export interface MemoryStoreOptions {
   /** Window used to aggregate counters. Default: timeWindow(30_000). */
   window?: Window
+}
+
+/**
+ * What `memoryStore()` returns: a StateStore whose reads and swaps answer
+ * synchronously. Stated in the type so that decorating one — the usual way
+ * to build a test double or add behavior — keeps working with plain values
+ * instead of `T | Promise<T>` unions.
+ */
+export interface MemoryStore extends StateStore {
+  readState: (name: string) => StateSnapshot
+  compareAndSet: (name: string, from: BreakerState, to: BreakerState, fence: number) => CasOutcome
 }
 
 /**
@@ -112,6 +170,9 @@ interface Durations {
 
 interface Entry {
   state: BreakerState
+  /** Bumped by every successful transition; see StateSnapshot.fence. */
+  fence: number
+  openedAt?: number
   window: WindowData
 }
 
@@ -156,9 +217,13 @@ const summarise = (values: Float64Array): LatencyStats => {
   }
 }
 
-export function memoryStore (options: MemoryStoreOptions = {}): StateStore {
+export function memoryStore (options: MemoryStoreOptions = {}): MemoryStore {
   const window = options.window ?? timeWindow(30_000)
   const entries = new Map<string, Entry>()
+  // Store-scoped so a fence is never reused, not even by a name that was
+  // deleted and came back: a swap still in flight across the delete would
+  // otherwise land on a period three generations later.
+  let nextFence = 0
 
   const freshWindow = (): WindowData => {
     if (window.kind === 'count') {
@@ -178,10 +243,23 @@ export function memoryStore (options: MemoryStoreOptions = {}): StateStore {
   const entry = (name: string): Entry => {
     let found = entries.get(name)
     if (found === undefined) {
-      found = { state: 'closed', window: freshWindow() }
+      found = { state: 'closed', fence: nextFence, window: freshWindow() }
       entries.set(name, found)
     }
     return found
+  }
+
+  const snapshotOf = (e: Entry): StateSnapshot => ({ state: e.state, fence: e.fence, openedAt: e.openedAt })
+
+  /**
+   * The period's timing, owned by the store so every instance sharing it
+   * agrees on when probing may start: stamped on the way into `open`,
+   * carried through `half-open` (same period, now probing), cleared when
+   * the circuit leaves the period altogether.
+   */
+  const stampTiming = (e: Entry, to: BreakerState): void => {
+    if (to === 'open') e.openedAt = Date.now()
+    else if (to !== 'half-open') e.openedAt = undefined
   }
 
   const expireBuckets = (data: WindowData & { kind: 'time' }, now: number): void => {
@@ -227,15 +305,20 @@ export function memoryStore (options: MemoryStoreOptions = {}): StateStore {
     sample(current.durations, durationMs)
   }
 
-  return {
-    getState: (name) => entry(name).state,
+  const readState = (name: string): StateSnapshot => snapshotOf(entry(name))
 
-    transition (name, from, to) {
-      const e = entry(name)
-      if (e.state !== from) return false
-      e.state = to
-      return true
-    },
+  const compareAndSet = (name: string, from: BreakerState, to: BreakerState, fence: number): CasOutcome => {
+    const e = entry(name)
+    if (e.state !== from || e.fence !== fence) return { ok: false, snapshot: snapshotOf(e) }
+    e.state = to
+    e.fence = ++nextFence
+    stampTiming(e, to)
+    return { ok: true, snapshot: snapshotOf(e) }
+  }
+
+  return {
+    readState,
+    compareAndSet,
 
     recordSuccess: (name, durationMs) => record(name, true, durationMs),
     recordFailure: (name, durationMs) => record(name, false, durationMs),
