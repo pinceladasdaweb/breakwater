@@ -165,7 +165,18 @@ interface RedisPort {
 |---|---|
 | ioredis (incl. Cluster) | `fromIoredis(client)` — scripts become client commands, called by SHA and reloaded on `NOSCRIPT` |
 | node-redis v4+ | `fromNodeRedis(client)` — `SCRIPT LOAD` on first use, then `EVALSHA`, reloading once if the server forgot it |
+| [`@pinceladasdaweb/redis`](https://www.npmjs.com/package/@pinceladasdaweb/redis) 4.1+ | none — it already registers scripts by name, so the client **is** the port: `redisStore({ client })` |
 | anything else | implement the two methods; a client that already registers scripts by name satisfies it directly |
+
+```ts
+// No adapter at all when the client speaks the port natively:
+import { RedisClient } from '@pinceladasdaweb/redis'
+import { redisStore } from 'breakwater/redis'
+
+const redis = new RedisClient({ host, port })
+await redis.connect()
+const store = redisStore({ client: redis })
+```
 
 Registering by name rather than sending the script body matters here: a
 circuit breaker evaluates state on **every request**, and `EVAL` ships the
@@ -189,6 +200,37 @@ made in between, and during a fleet-wide outage every instance is writing at
 once — so each would undercount the others and open late, exactly when the
 decision matters most. The extra trip buys a decision that is actually the
 fleet's.
+
+### What that costs, measured
+
+Reproduce with [`benchmarks/redis-overhead.mjs`](../benchmarks/redis-overhead.mjs);
+these are 2000 sequential calls per row against Redis 7 on loopback:
+
+| path | ops/sec | p50 | p99 |
+|---|---:|---:|---:|
+| memory · healthy call | 389,279 | 0.002 ms | 0.012 ms |
+| **redis · healthy call** | **3,904** | **0.244 ms** | 0.500 ms |
+| memory · fast rejection | 85,589 | 0.011 ms | 0.026 ms |
+| **redis · fast rejection** | **6,682** | **0.144 ms** | 0.255 ms |
+
+Read those two numbers, not the ratio. The ratio (≈136×) is the kind of
+figure that decides nothing; **+0.24 ms per protected call** is the number you
+size against, and it is almost entirely round trips — which is why the fast
+rejection, at two trips instead of three, is the *cheaper* path here.
+
+Two caveats that matter more than the table:
+
+- **Loopback is the floor.** There is no network in these numbers. Add your
+  real RTT three times over for a healthy call: at 1 ms to your Redis, expect
+  roughly 3 ms, and the in-process work stays lost in the noise.
+- **The ops/sec column is latency, not capacity.** The benchmark is
+  sequential, so it measures one call at a time. A service making these calls
+  concurrently is bounded by its connection and its Redis, not by 3,904.
+
+If that budget does not fit a given call path, the answer is not a faster
+store — it is to keep that path on the in-memory store and share only the
+circuits where the fleet agreeing is worth a couple of round trips. Both kinds
+of breaker compose in the same pipeline.
 
 ## Gotchas
 
