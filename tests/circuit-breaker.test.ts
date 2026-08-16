@@ -906,6 +906,37 @@ describe('shared state store', () => {
     breaker.dispose()
   })
 
+  test('an announcement never delivered costs freshness, not agreement', async () => {
+    const shared = memoryStore({ window: countWindow(10) })
+    const store: StateStore = {
+      ...shared,
+      readState: async (name) => shared.readState(name),
+      compareAndSet: async (name, from, to, fence) => shared.compareAndSet(name, from, to, fence),
+      recordSuccess: async (name, ms) => { shared.recordSuccess(name, ms) },
+      recordFailure: async (name, ms) => { shared.recordFailure(name, ms) },
+      getCounters: async (name) => shared.getCounters(name),
+      resetCounters: async (name) => { shared.resetCounters(name) },
+      acquireProbe: async () => true,
+      // Subscribed, and nothing is ever delivered on it: whatever a peer
+      // published while this connection was reconnecting is simply gone.
+      subscribe: () => () => {}
+    }
+    const peer = circuitBreaker({ consecutiveFailures: 1, name: 'shared', stateStore: store })
+    const deaf = circuitBreaker({ consecutiveFailures: 1, name: 'shared', stateStore: store })
+
+    await failTimes(peer, 1)
+    assert.equal(peer.state, 'open')
+    assert.equal(deaf.state, 'closed', 'it never heard about the trip')
+
+    // Holding a subscription must never become a reason to skip the read:
+    // the push accelerates agreement, the store is what decides it.
+    await assert.rejects(deaf.execute(() => 'never runs'), isCircuitOpenError)
+    assert.equal(deaf.state, 'open', 'it converged on the read alone')
+
+    peer.dispose()
+    deaf.dispose()
+  })
+
   test('dispose reaches a breaker built through a composition', async () => {
     const inner = memoryStore({ window: countWindow(10) })
     let released = 0
