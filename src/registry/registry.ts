@@ -72,13 +72,13 @@ const withDefaultNames = (name: string, options: ResilienceOptions): ResilienceO
 
 export function createPolicyRegistry (initial?: Record<string, ResilienceOptions | Policy>): PolicyRegistry {
   const entries = new Map<string, Policy>()
-  // What the registry built, and is therefore the registry's to release.
-  const built = new WeakSet<Policy>()
+  // The release the registry owes for what it built. Holding the call itself
+  // rather than testing for one keeps the ownership rule and the teardown in
+  // the same place: an entry is in here only if releasing it is ours to do.
+  const owned = new WeakMap<Policy, () => void>()
 
   const release = (policy: Policy | undefined): void => {
-    if (policy === undefined || !built.has(policy)) return
-    const releasable = policy as { dispose?: () => void }
-    if (typeof releasable.dispose === 'function') releasable.dispose()
+    if (policy !== undefined) owned.get(policy)?.()
   }
 
   const registry: PolicyRegistry = {
@@ -88,9 +88,13 @@ export function createPolicyRegistry (initial?: Record<string, ResilienceOptions
         throw new RangeError(`policy "${name}" is already defined — a second definition would silently diverge from the first`)
       }
 
-      const prebuilt = isPolicy(config)
-      const policy = prebuilt ? config : resilience(withDefaultNames(name, config))
-      if (!prebuilt) built.add(policy)
+      if (isPolicy(config)) {
+        entries.set(name, config)
+        return config
+      }
+
+      const policy = resilience(withDefaultNames(name, config))
+      owned.set(policy, () => { policy.dispose() })
       entries.set(name, policy)
       return policy
     },
