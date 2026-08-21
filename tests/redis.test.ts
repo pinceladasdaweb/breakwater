@@ -1031,6 +1031,31 @@ describe('redisStore() pushed state changes', () => {
     assert.equal(reported.mock.callCount(), 1, 'only the unreadable state is worth reporting')
   })
 
+  test('an unreadable timing costs the stamp, not the whole read', async () => {
+    const client = fakePort()
+    // The state and the fence are readable; only the timing is not — a stray
+    // HSET, another tenant on the prefix, a hand edit.
+    client.answer('bwReadState', readState('open', 4, 'nonsense'))
+    const store = redisStore({ client })
+
+    const snapshot = await store.readState('api')
+    // Dropped rather than adopted as NaN: the breaker then counts the cooldown
+    // from first observation, instead of comparing against NaN forever and
+    // never reaching half-open again.
+    assert.deepEqual(snapshot, { state: 'open', fence: 4 })
+    assert.equal(Object.hasOwn(snapshot, 'openedAt'), false)
+  })
+
+  test('a fence that is not a number is refused, empty string included', async () => {
+    const client = fakePort()
+    // Number('') is 0, which is finite — so an empty fence would otherwise
+    // read as a legitimate period zero.
+    client.answer('bwReadState', readState('open', '' as unknown as number, '1000'))
+    const store = redisStore({ client })
+
+    assert.deepEqual(await store.readState('api'), { state: 'closed', fence: 0 })
+  })
+
   test('releasing the subscription stops the pushes', async () => {
     const client = subscribablePort()
     const store = redisStore({ client })

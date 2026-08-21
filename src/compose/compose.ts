@@ -64,14 +64,24 @@ export function compose (...policies: Policy[]): ComposedPolicy {
       return [{ kind: policy.kind ?? 'custom', stats: source.stats() }]
     })
 
-  // A frozen copy: the exposed list can never rewrite the invoke chain,
-  // which closes over the private rest-parameter array.
   const dispose = (): void => {
     for (const policy of policies) {
       const releasable = policy as Disposable
-      if (typeof releasable.dispose === 'function') releasable.dispose()
+      if (typeof releasable.dispose !== 'function') continue
+      try {
+        releasable.dispose()
+      } catch (error) {
+        // Any object implementing the contract may take part, so one release
+        // that goes wrong must not strand the policies behind it in the list —
+        // a breaker's subscription is exactly what this exists to let go of.
+        console.error('breakwater: policy dispose threw', error)
+      }
     }
   }
 
-  return { ...base, kind: 'compose' as const, policies: Object.freeze([...policies]), stats, dispose }
+  // A frozen copy: the exposed list can never rewrite the invoke chain,
+  // which closes over the private rest-parameter array.
+  const exposed = Object.freeze([...policies])
+
+  return { ...base, kind: 'compose' as const, policies: exposed, stats, dispose }
 }

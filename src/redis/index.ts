@@ -205,13 +205,20 @@ export function redisStore (options: RedisStoreOptions): RedisStore {
     // match none of the breaker's branches, so every call would be admitted
     // and no trip could ever swap away from it — the circuit would never
     // open again. Refuse to read it instead, and answer from what we know.
-    if (!KNOWN_STATES.has(state) || !Number.isFinite(Number(fence))) {
+    if (!KNOWN_STATES.has(state) || fence === '' || !Number.isFinite(Number(fence))) {
       throw new TypeError(`unreadable circuit state from redis: ${JSON.stringify(state)} / ${JSON.stringify(fence)}`)
     }
+    // The timing is advisory where the state and the fence are not, so an
+    // unreadable one is dropped rather than failing the whole read: the
+    // breaker then counts the cooldown from first observation, which is the
+    // documented behaviour for a store that reports no timing. Adopting the
+    // NaN instead would make `now >= openedAt + halfOpenAfter` false forever
+    // and leave the circuit open with no way back to half-open.
+    const stampedAt = Number(openedAt)
     return {
       state: state as BreakerState,
       fence: Number(fence),
-      ...(openedAt !== '' && { openedAt: Number(openedAt) })
+      ...(openedAt !== '' && Number.isFinite(stampedAt) && { openedAt: stampedAt })
     }
   }
 

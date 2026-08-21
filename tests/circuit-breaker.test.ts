@@ -906,6 +906,30 @@ describe('shared state store', () => {
     breaker.dispose()
   })
 
+  test('a timing it cannot compare against never strands the circuit open', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    t.mock.timers.setTime(1_000_000)
+    const inner = memoryStore({ window: countWindow(10) })
+    const store: StateStore = {
+      ...inner,
+      // A store handing back an unusable stamp: NaN would make
+      // `now >= openedAt + halfOpenAfter` false for good, so the circuit
+      // could never reach half-open again.
+      readState: () => ({ state: 'open', fence: 1, openedAt: Number('nonsense') }),
+      compareAndSet: (_name, _from, to) => ({ ok: true, snapshot: { state: to, fence: 2 } }),
+      acquireProbe: () => true
+    }
+    const breaker = circuitBreaker({ halfOpenAfter: 1_000, name: 'unusable-timing', stateStore: store })
+
+    // Rejected while the cooldown counted from first observation runs...
+    await assert.rejects(breaker.execute(() => 'never runs'), isCircuitOpenError)
+    t.mock.timers.tick(1_001)
+
+    // ...and admitted once it elapses, instead of being refused forever.
+    assert.equal(await breaker.execute(() => 'probe ran'), 'probe ran')
+    breaker.dispose()
+  })
+
   test('an announcement never delivered costs freshness, not agreement', async () => {
     const shared = memoryStore({ window: countWindow(10) })
     const store: StateStore = {

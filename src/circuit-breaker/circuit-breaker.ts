@@ -257,7 +257,12 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
       probesInFlight = 0
     }
     localState = snapshot.state
-    if (snapshot.openedAt !== undefined) openedAt = snapshot.openedAt
+    // A store is an implementable interface, so a timing we cannot compare
+    // against is treated as one the store did not report — NaN would make
+    // `Date.now() >= openedAt + halfOpenAfter` false for good and strand the
+    // circuit open, which is the opposite of degrading gracefully.
+    const stampedAt = Number.isFinite(snapshot.openedAt) ? snapshot.openedAt : undefined
+    if (stampedAt !== undefined) openedAt = stampedAt
     else if (snapshot.state !== 'open' && snapshot.state !== 'half-open') openedAt = undefined
   }
 

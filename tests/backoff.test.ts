@@ -80,4 +80,18 @@ describe('exponential()', () => {
     // A typo would otherwise make the switch return undefined delays.
     assert.throws(() => exponential({ jitter: 'ful' as never }), { name: 'RangeError', message: /jitter/ })
   })
+
+  test('a bad max fails here, not as a bogus delay on the first retry', () => {
+    // Math.min() would hand these straight through, and the delay only gets
+    // computed once something is already failing — the worst moment to
+    // replace the caller's error with a RangeError from the backoff.
+    for (const max of [-5, NaN]) {
+      assert.throws(() => exponential({ max }), { name: 'RangeError', message: /max/ })
+      assert.throws(() => linear({ initial: 100, increment: 100, max }), { name: 'RangeError', message: /max/ })
+    }
+
+    // Infinity is how both spell "no bound", so it must stay valid.
+    assert.equal(exponential({ max: Infinity, jitter: 'none' })(1), 100)
+    assert.equal(linear({ initial: 100, increment: 100, max: Infinity })(1), 100)
+  })
 })
