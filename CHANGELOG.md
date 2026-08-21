@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 1.1.1 (2026-08-21)
+
+* test: pin the read as the authority a lost push cannot replace by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/8fad3f071cff424a97d047cf5afd7a8f88e7e6b1)
+* build(deps-dev): update the toolchain, and drop a guard it exposed by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/59f60103b44f3e2e4ff6149f1c20820ac4f4a1dd)
+* build(deps-dev): patch rollup, and force the fixed qs through a pinned transitive by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/2d488d927592d4c309ee58780c929956d8c318cb)
+* fix: refuse a timing that cannot be compared, and a fence that came back by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/2831c99d355f12522deedfd53b1e9f0e38b18004)
+* fix: stamp each open period from its own start, and count a channel before acquiring it by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/37f79b5d0e2f5b6e0c53c43e81729c54c3bbc95c)
+* docs: document the lifecycle and the contracts the code already enforces by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/edd9fc7e13ab7627569c677535bd1b36d74f6438)
+
+
 ## 1.1.0 (2026-08-15)
 
 * docs: publish the distributed overhead, and name the zero-glue client by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/9be65a670a1d94acfc6f4f8a63368eae1e7f8d64)
