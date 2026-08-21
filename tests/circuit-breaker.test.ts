@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { circuitBreaker } from '../src/circuit-breaker/circuit-breaker'
 import { resilience } from '../src/compose/resilience'
 import { fixed } from '../src/retry/backoff'
-import { memoryStore, type LatencyStats, type StateSnapshot, type StateStore } from '../src/circuit-breaker/state-store'
+import { memoryStore, type LatencyStats, type StateSnapshot, type StateStore, type WindowCounters } from '../src/circuit-breaker/state-store'
 import { countWindow, timeWindow } from '../src/circuit-breaker/window'
 import { isCircuitOpenError, isIsolatedError } from '../src/errors'
 
@@ -927,6 +927,62 @@ describe('shared state store', () => {
 
     // ...and admitted once it elapses, instead of being refused forever.
     assert.equal(await breaker.execute(() => 'probe ran'), 'probe ran')
+    breaker.dispose()
+  })
+
+  test('a new period never inherits the cooldown of the one before it', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    t.mock.timers.setTime(1_000_000)
+    let snapshot: StateSnapshot = { state: 'open', fence: 1, openedAt: 1_000_000 }
+    const inner = memoryStore({ window: countWindow(10) })
+    const store: StateStore = {
+      ...inner,
+      readState: () => snapshot,
+      compareAndSet: (_name, _from, to) => ({ ok: true, snapshot: { state: to, fence: 99 } }),
+      acquireProbe: () => true
+    }
+    const breaker = circuitBreaker({ halfOpenAfter: 300_000, name: 'fresh-period', stateStore: store })
+
+    // Period 1's cooldown elapses and its probe is admitted.
+    t.mock.timers.tick(300_001)
+    assert.equal(await breaker.execute(() => 'probe of period 1'), 'probe of period 1')
+
+    // A NEW period opens, and this time the store cannot report its timing.
+    snapshot = { state: 'open', fence: 2, openedAt: Number('corrupt') }
+
+    // Inheriting period 1's stamp would put the probe moment 5 minutes in the
+    // past and admit every caller against a dependency that just failed.
+    await assert.rejects(breaker.execute(() => 'never runs'), isCircuitOpenError)
+    t.mock.timers.tick(300_001)
+    assert.equal(await breaker.execute(() => 'probe of period 2'), 'probe of period 2')
+    breaker.dispose()
+  })
+
+  test('counters arriving as a foreign thenable still reach stats()', async () => {
+    const inner = memoryStore({ window: countWindow(10) })
+    // Not a native Promise: another realm, a userland promise library, a
+    // hand-rolled wrapper. `instanceof Promise` misses all of them.
+    const thenable = <T>(value: T): PromiseLike<T> => ({
+      then: <R1 = T, R2 = never>(
+        onOk?: ((v: T) => R1 | PromiseLike<R1>) | null,
+        _onErr?: ((reason: unknown) => R2 | PromiseLike<R2>) | null
+      ): PromiseLike<R1 | R2> => thenable<R1 | R2>(onOk?.(value) as R1)
+    })
+    const store: StateStore = {
+      ...inner,
+      getCounters: (name) => thenable(inner.getCounters(name)) as unknown as WindowCounters
+    }
+    const breaker = circuitBreaker({ minimumCalls: 4, name: 'thenable', stateStore: store })
+
+    for (let i = 0; i < 3; i++) {
+      await assert.rejects(breaker.execute(() => { throw new Error('down') }))
+    }
+    await drain()
+
+    // Assigning the thenable itself would leave every counter undefined — and
+    // stats() is what CircuitOpenError and any health endpoint report.
+    assert.equal(breaker.stats().totalCalls, 3)
+    assert.equal(breaker.stats().failures, 3)
     breaker.dispose()
   })
 

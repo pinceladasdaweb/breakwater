@@ -65,6 +65,16 @@ export function fromIoredis (client: IoredisLike, subscriber?: IoredisSubscriber
   // silently stops the pushes for every other breaker sharing its name.
   const listenersPerChannel = new Map<string, number>()
 
+  const drop = (channel: string): void => {
+    const left = (listenersPerChannel.get(channel) ?? 1) - 1
+    if (left > 0) {
+      listenersPerChannel.set(channel, left)
+      return
+    }
+    listenersPerChannel.delete(channel)
+    subscriber?.unsubscribe(channel).catch(() => {})
+  }
+
   return {
     ...(subscriber !== undefined && {
       async subscribe (channel: string, onMessage: (message: string) => void) {
@@ -72,28 +82,28 @@ export function fromIoredis (client: IoredisLike, subscriber?: IoredisSubscriber
           if (from === channel) onMessage(message)
         }
         subscriber.on('message', listener)
+        // Counted BEFORE the round trip, not after it. A release landing while
+        // this subscribe is still in flight would otherwise read a count that
+        // does not include us, reach zero, and UNSUBSCRIBE the channel we are
+        // in the middle of acquiring — leaving a live listener attached to a
+        // subscription the server no longer has, and pushes silently gone.
+        listenersPerChannel.set(channel, (listenersPerChannel.get(channel) ?? 0) + 1)
         try {
           await subscriber.subscribe(channel)
         } catch (error) {
           // The caller never gets a release function for a subscription that
-          // did not happen, so detaching here is the only chance to.
+          // did not happen, so giving the count back here is the only chance.
           subscriber.off('message', listener)
+          drop(channel)
           throw error
         }
-        listenersPerChannel.set(channel, (listenersPerChannel.get(channel) ?? 0) + 1)
 
         let released = false
         return () => {
           if (released) return
           released = true
           subscriber.off('message', listener)
-          const left = (listenersPerChannel.get(channel) ?? 1) - 1
-          if (left > 0) {
-            listenersPerChannel.set(channel, left)
-            return
-          }
-          listenersPerChannel.delete(channel)
-          subscriber.unsubscribe(channel).catch(() => {})
+          drop(channel)
         }
       }
     }),

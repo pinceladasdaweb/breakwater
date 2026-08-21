@@ -104,6 +104,24 @@ export interface CircuitBreakerPolicy extends Policy, Observable<CircuitBreakerE
 
 const EMPTY_COUNTERS: WindowCounters = { successes: 0, failures: 0, totalCalls: 0, failureRate: 0 }
 
+/**
+ * A period stamp the breaker can actually decide on. NaN and Infinity make
+ * `now >= openedAt + halfOpenAfter` false for good, stranding the circuit
+ * open, so neither is a timing and both are treated as one the store did not
+ * report. Zero is left alone: it is a legitimate epoch millisecond, and
+ * refusing it would reject a real stamp under a mocked or reset clock.
+ */
+const usableStamp = (value: number | undefined): number | undefined =>
+  value !== undefined && Number.isFinite(value) ? value : undefined
+
+/**
+ * Duck-typed rather than `instanceof Promise`: a store may hand back a
+ * thenable from another realm or library, and an identity check would assign
+ * that object straight into the mirror as if it were the value.
+ */
+const isThenable = <T>(value: T | PromiseLike<T>): value is PromiseLike<T> =>
+  typeof (value as PromiseLike<T> | undefined)?.then === 'function'
+
 export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBreakerPolicy {
   const failureThreshold = options.failureThreshold ?? 0.5
   if (!(failureThreshold > 0 && failureThreshold <= 1)) {
@@ -192,9 +210,9 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
       const counters = store.getCounters(name)
       // An async store feeds the mirror when the read lands; stats() answers
       // synchronously from last-known values either way.
-      if (counters instanceof Promise) {
+      if (isThenable(counters)) {
         const seq = ++countersReadSeq
-        counters.then((value) => { if (seq === countersReadSeq) lastCounters = value }, reportStoreError)
+        Promise.resolve(counters).then((value) => { if (seq === countersReadSeq) lastCounters = value }, reportStoreError)
       } else {
         lastCounters = counters
       }
@@ -207,9 +225,9 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
     if (store.getLatency === undefined) return
     try {
       const latency = store.getLatency(name)
-      if (latency instanceof Promise) {
+      if (isThenable(latency)) {
         const seq = ++latencyReadSeq
-        latency.then((value) => { if (seq === latencyReadSeq) lastLatency = value }, reportStoreError)
+        Promise.resolve(latency).then((value) => { if (seq === latencyReadSeq) lastLatency = value }, reportStoreError)
       } else {
         lastLatency = latency
       }
@@ -255,13 +273,16 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
       currentFence = snapshot.fence
       probeSuccesses = 0
       probesInFlight = 0
+      // The timing we were holding describes the period we just left. Keeping
+      // it to paper over an unusable replacement would measure the new
+      // period's cooldown from the old one's start — already elapsed, so
+      // every call would be admitted as a probe against a dependency that
+      // has only just failed. Cleared, so the admission path below stamps
+      // this period from first observation instead.
+      openedAt = undefined
     }
     localState = snapshot.state
-    // A store is an implementable interface, so a timing we cannot compare
-    // against is treated as one the store did not report — NaN would make
-    // `Date.now() >= openedAt + halfOpenAfter` false for good and strand the
-    // circuit open, which is the opposite of degrading gracefully.
-    const stampedAt = Number.isFinite(snapshot.openedAt) ? snapshot.openedAt : undefined
+    const stampedAt = usableStamp(snapshot.openedAt)
     if (stampedAt !== undefined) openedAt = stampedAt
     else if (snapshot.state !== 'open' && snapshot.state !== 'half-open') openedAt = undefined
   }
@@ -312,7 +333,7 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
     // the PREVIOUS open period's stamp — which would put nextAttemptAt in the
     // past and admit every later call as a probe, forever. This period began
     // now.
-    if (outcome.snapshot.openedAt === undefined) openedAt = Date.now()
+    if (usableStamp(outcome.snapshot.openedAt) === undefined) openedAt = Date.now()
     consecutive = 0
     changeState(from, 'open', correlationId)
   }

@@ -5,8 +5,15 @@ import type { CircuitBreakerStats } from './circuit-breaker/circuit-breaker'
 /**
  * Base class for every error thrown by breakwater.
  *
- * Consumers must branch on the stable `code` property (or use the exported
- * type guards), never on error messages.
+ * Branch on the stable `code`, never on error messages.
+ *
+ * The exported type guards below are the convenient form of that check, but
+ * they are not interchangeable with it: they test class identity, so they
+ * answer false for an error thrown by a DIFFERENT copy of this module. A
+ * process holds more than one whenever an app imports the ESM build while a
+ * dependency requires the CJS one, or two versions resolve under separate
+ * paths. Use the guards for errors your own pipelines raise; compare `code`
+ * when the error may have crossed a package boundary.
  */
 export class BreakwaterError extends Error {
   readonly code: string
@@ -123,6 +130,9 @@ export class FallbackFailedError extends BreakwaterError {
   }
 }
 
+// Identity checks by design — see BreakwaterError for when to compare `code`
+// instead. They stay precise about the class: a bare BreakwaterError carrying
+// someone else's code is not the error that code belongs to.
 export function isBreakwaterError (error: unknown): error is BreakwaterError {
   return error instanceof BreakwaterError
 }
