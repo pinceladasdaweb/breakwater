@@ -52,6 +52,13 @@ Semantics that keep configuration honest:
 - **Same name, same instance** — every `get('payments-api')` returns the
   same policy, so the circuit breaker state is genuinely shared across
   modules. That is the point.
+- **`delete` and `clear` release what the registry built** — they call
+  [`dispose()`](composition.md#releasing-a-pipeline-with-dispose)
+  on the pipelines they created from options, because the registry is their
+  only holder: dropping the entry without releasing would leave a breaker's
+  subscription alive with nothing left to let go of it. A **prebuilt** policy
+  you handed to `define()` is left alone — you built it and still hold it, so
+  tearing it down here would break code that is still using it.
 
 ## Names flow into metrics automatically
 

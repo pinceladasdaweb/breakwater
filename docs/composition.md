@@ -239,3 +239,39 @@ pipeline (tests, adapters).
 Any composed pipeline — custom policies included — can also be registered
 under a name and shared across modules: see
 [named policies](named-policies.md).
+
+## Releasing a pipeline with `dispose()`
+
+`compose()` and `resilience()` both return a `dispose()`. It releases whatever
+the composed policies are holding — today that means a circuit breaker's
+subscription to a [shared state store](redis.md#pushed-state-changes):
+
+```ts
+const pipeline = resilience({
+  circuitBreaker: { name: 'payments', stateStore: store },
+  retry: { attempts: 3 }
+})
+
+// ...on shutdown, or when the pipeline is replaced
+pipeline.dispose()
+```
+
+It exists because the breaker is not a handle you were ever given. When you
+build it through `resilience()`, the composition is the only reference to it,
+so without `dispose()` reaching inwards there would be no way to release its
+subscription at all.
+
+Three things worth knowing:
+
+- **It reaches nested compositions** and skips policies with nothing to
+  release, so you call it on the outermost pipeline and nothing else.
+- **It is safe to call more than once**, and the pipeline keeps working
+  afterwards: a disposed breaker simply goes back to learning about the shared
+  circuit on its next read.
+- **One release that fails does not strand the rest.** A custom policy whose
+  `dispose()` throws is reported to `console.error` and the remaining
+  policies are still released — otherwise the first broken teardown in the
+  list would keep every subscription behind it alive.
+
+A pipeline with no shared store holds nothing, so calling it is harmless but
+pointless. If your policies are all in-process, ignore it.
