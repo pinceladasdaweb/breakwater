@@ -241,6 +241,14 @@ when probing may start. A store that leaves it out still works — each
 instance then counts the cooldown from the moment it first *observed* the
 open circuit.
 
+**A fence must never be reused for a name — including one that was deleted
+and came back, or a key that expired and was recreated.** This is the easiest
+part to get subtly wrong, and it is the whole guarantee: counting per name
+from zero hands a recreated circuit the fence its own last period ended on, so
+a swap decided before the deletion matches on both state *and* fence and
+commits against a circuit born after it. Mint from a counter scoped to the
+**store**, not to the name.
+
 The state half of a custom store is about fifteen lines (the counter half —
 `recordSuccess`, `recordFailure`, `getCounters`, `resetCounters` and
 `acquireProbe` — is whatever your backend makes natural):
@@ -249,7 +257,16 @@ The state half of a custom store is about fifteen lines (the counter half —
 import type { StateSnapshot, StateStore } from 'breakwater'
 
 const state = new Map<string, StateSnapshot>()
-const read = (name: string): StateSnapshot => state.get(name) ?? { state: 'closed', fence: 0 }
+// Store-scoped, so no name ever sees a fence twice.
+let nextFence = 0
+
+const read = (name: string): StateSnapshot => {
+  const found = state.get(name)
+  if (found !== undefined) return found
+  const fresh: StateSnapshot = { state: 'closed', fence: ++nextFence }
+  state.set(name, fresh)
+  return fresh
+}
 
 const stateHalf: Pick<StateStore, 'readState' | 'compareAndSet'> = {
   readState: read,
@@ -258,7 +275,7 @@ const stateHalf: Pick<StateStore, 'readState' | 'compareAndSet'> = {
     if (current.state !== from || current.fence !== fence) return { ok: false, snapshot: current }
     const next: StateSnapshot = {
       state: to,
-      fence: current.fence + 1,
+      fence: ++nextFence,
       openedAt: to === 'open' ? Date.now() : to === 'half-open' ? current.openedAt : undefined
     }
     state.set(name, next)
@@ -266,6 +283,13 @@ const stateHalf: Pick<StateStore, 'readState' | 'compareAndSet'> = {
   }
 }
 ```
+
+One more contract detail if your store crosses a network: `openedAt` must be a
+number the breaker can compare against. A `NaN` — from a field that was hand
+edited, or written by something else on the same prefix — makes
+`now >= openedAt + halfOpenAfter` false forever and leaves the circuit open
+with no route back to half-open. Omit the timing rather than reporting one you
+cannot vouch for; the breaker then counts the cooldown from first observation.
 
 ### Migrating from `getState` / `transition`
 

@@ -81,4 +81,29 @@ describe('fallback()', () => {
       /aborted work/
     )
   })
+
+  test('cancelling mid-chain stops the handlers still queued', async () => {
+    const controller = new AbortController()
+    const tried: number[] = []
+
+    const policy = fallback<string>([
+      async () => {
+        tried.push(0)
+        // The caller gives up while the first handler is still working.
+        controller.abort(new Error('cancelled'))
+        throw new Error('handler 0 failed')
+      },
+      async () => { tried.push(1); return 'from handler 1' },
+      async () => { tried.push(2); return 'from handler 2' }
+    ])
+
+    // The original failure, not a replacement produced for a caller that is
+    // already gone — and not FallbackFailedError either, since the chain was
+    // abandoned rather than exhausted.
+    await assert.rejects(
+      policy.execute(() => { throw new Error('down') }, { signal: controller.signal }),
+      /down/
+    )
+    assert.deepEqual(tried, [0], 'handlers 1 and 2 must not run for a cancelled caller')
+  })
 })

@@ -177,6 +177,8 @@ turning jitter back on once the behavior is validated.
 - **Delays are clamped to setTimeout's ceiling (2³¹−1 ms ≈ 24.8 days)** —
   past it, the platform would fire after ~1ms, inverting your largest
   backoffs into your fastest retries. A custom backoff returning `NaN`,
-  `Infinity` or a negative delay throws a `RangeError` instead of looping hot.
+  `Infinity` or a negative delay throws a `RangeError` instead of looping hot;
+  a bad `max` on the built-in backoffs is refused at construction, so it
+  cannot surface as that error on the first failure in production.
 - **`ctx.metadata` is one shared object across attempts** — deliberately, so
   attempts can accumulate context. Do not treat it as per-attempt state.

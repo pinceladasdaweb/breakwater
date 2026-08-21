@@ -257,7 +257,11 @@ export function memoryStore (options: MemoryStoreOptions = {}): MemoryStore {
   const entry = (name: string): Entry => {
     let found = entries.get(name)
     if (found === undefined) {
-      found = { state: 'closed', fence: nextFence, window: freshWindow() }
+      // Minted, not merely read: seeding with the current counter would hand a
+      // recreated name the fence its own last period ended on, and a swap
+      // still in flight across the delete would then match on both state and
+      // fence — the ABA this token exists to refuse.
+      found = { state: 'closed', fence: ++nextFence, window: freshWindow() }
       entries.set(name, found)
     }
     return found

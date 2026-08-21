@@ -91,6 +91,15 @@ const CLOSED: StateSnapshot = { state: 'closed', fence: 0 }
 const KNOWN_STATES = new Set<string>(['closed', 'open', 'half-open', 'isolated'])
 
 /**
+ * A reply field that really is a number, judged as a STRING before coercion.
+ * Number() maps '' and any whitespace-only field to 0, which is finite — so a
+ * check on the coerced value cannot tell the epoch from nothing at all, and
+ * would read a blank timing as a stamp decades in the past.
+ */
+const isNumeric = (value: string | undefined): boolean =>
+  value !== undefined && value.trim() !== '' && Number.isFinite(Number(value))
+
+/**
  * A circuit breaker state store shared through Redis: N instances of a
  * service agree that a dependency is down, and only one of them probes it
  * while the rest keep failing fast.
@@ -205,13 +214,19 @@ export function redisStore (options: RedisStoreOptions): RedisStore {
     // match none of the breaker's branches, so every call would be admitted
     // and no trip could ever swap away from it — the circuit would never
     // open again. Refuse to read it instead, and answer from what we know.
-    if (!KNOWN_STATES.has(state) || !Number.isFinite(Number(fence))) {
+    if (!KNOWN_STATES.has(state) || !isNumeric(fence)) {
       throw new TypeError(`unreadable circuit state from redis: ${JSON.stringify(state)} / ${JSON.stringify(fence)}`)
     }
+    // The timing is advisory where the state and the fence are not, so an
+    // unreadable one is dropped rather than failing the whole read: the
+    // breaker then counts the cooldown from first observation, which is the
+    // documented behaviour for a store that reports no timing. Adopting a
+    // number we cannot compare against would strand the circuit open with no
+    // route back to half-open.
     return {
       state: state as BreakerState,
       fence: Number(fence),
-      ...(openedAt !== '' && { openedAt: Number(openedAt) })
+      ...(isNumeric(openedAt) && { openedAt: Number(openedAt) })
     }
   }
 

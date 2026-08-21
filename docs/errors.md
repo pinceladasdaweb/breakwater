@@ -4,6 +4,10 @@ Every error breakwater throws extends `BreakwaterError` and carries a stable,
 machine-readable `code`. **Branch on the code or the type guards — never on
 messages** (messages may change in any release; codes never do).
 
+The two are not quite interchangeable: the guards test class identity, so
+`code` is the one that survives every boundary. See
+[branching on `code`](#branching-on-code) for when that difference bites.
+
 ```ts
 import {
   isBreakwaterError,
@@ -85,8 +89,20 @@ app.post('/charge', async (req, res) => {
 
 ### Branching on `code`
 
-When the error crossed a serialization boundary (worker threads, logs, IPC)
-and `instanceof` no longer works:
+The type guards are `instanceof` checks, which answer `false` in two
+situations worth knowing about:
+
+- **The error crossed a serialization boundary** — worker threads, logs, IPC.
+  The class is gone; only the data survived.
+- **Two copies of breakwater are loaded.** A process holds more than one
+  whenever your app imports the ESM build while a dependency requires the CJS
+  one, or two versions resolve under separate `node_modules` paths. Each copy
+  defines its own classes, so a `CircuitOpenError` raised by a library's
+  pipeline is not an `instanceof` *your* `CircuitOpenError` — while its `code`
+  still reads `'CIRCUIT_OPEN'`.
+
+Use the guards for errors your own pipelines raise, and compare `code` when
+the error may have come from somewhere else:
 
 ```ts
 switch ((error as { code?: string }).code) {

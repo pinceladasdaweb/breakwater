@@ -87,4 +87,25 @@ describe('compose()', () => {
     assert.equal(result, 'stale response')
     assert.equal(calls, 2)
   })
+
+  test('one release that throws does not strand the policies behind it', (t) => {
+    t.mock.method(console, 'error', () => {})
+    let released = 0
+
+    // Any object implementing the contract may take part, so a custom policy
+    // whose teardown fails is a shape compose() has to survive.
+    const brittle: Policy = {
+      ...basePolicy(async (fn, ctx) => await fn(ctx)),
+      dispose: () => { throw new Error('client already closed') }
+    } as Policy
+    const releasable: Policy = {
+      ...basePolicy(async (fn, ctx) => await fn(ctx)),
+      dispose: () => { released++ }
+    } as Policy
+
+    const policy = compose(brittle, releasable)
+
+    assert.doesNotThrow(() => { policy.dispose() })
+    assert.equal(released, 1, 'the policy after the failing one still got released')
+  })
 })

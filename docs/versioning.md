@@ -45,16 +45,17 @@ Most types here are ones you *consume*: `CircuitBreakerStats`,
 `CircuitBreakerOptions`, the event payloads. Adding a field to those is a
 **minor** — your code keeps compiling.
 
-But four interfaces exist for you to *implement*:
+But five interfaces exist for you to *implement*:
 
 - `StateStore` (circuit breaker state)
 - `CacheStore` (the stale cache)
+- `RateLimitStore` (a shared rate limit quota)
 - `MetricsCollector` (metrics adapters)
 - `RedisPort` (the Redis client boundary)
 
 For these the direction reverses: **adding a required member is a breaking
 change**, because your implementation suddenly no longer satisfies the
-interface. So on those four, after 1.0:
+interface. So on those five, after 1.0:
 
 - new capabilities arrive as **optional** members, and the library keeps
   working when they are absent;
@@ -63,9 +64,11 @@ interface. So on those four, after 1.0:
   interface, something calls it.
 
 That last rule cost `StateStore.subscribe` its place before 1.0: it was
-declared for a push-based invalidation that nothing called yet. Pushed state
-changes are planned, and will arrive as an optional member in a minor when
-the code behind them exists.
+declared for a push-based invalidation that nothing called yet, so it was
+removed rather than shipped as a name with no behaviour behind it. It came
+back in `1.1.0` as an optional member, in a minor, once
+[pushed state changes](redis.md#pushed-state-changes) existed — which is the
+rule working exactly as written, in both directions.
 
 ## What counts as breaking
 

@@ -1031,6 +1031,48 @@ describe('redisStore() pushed state changes', () => {
     assert.equal(reported.mock.callCount(), 1, 'only the unreadable state is worth reporting')
   })
 
+  test('an unreadable timing costs the stamp, not the whole read', async () => {
+    const client = fakePort()
+    // The state and the fence are readable; only the timing is not — a stray
+    // HSET, another tenant on the prefix, a hand edit.
+    client.answer('bwReadState', readState('open', 4, 'nonsense'))
+    const store = redisStore({ client })
+
+    const snapshot = await store.readState('api')
+    // Dropped rather than adopted as NaN: the breaker then counts the cooldown
+    // from first observation, instead of comparing against NaN forever and
+    // never reaching half-open again.
+    assert.deepEqual(snapshot, { state: 'open', fence: 4 })
+    assert.equal(Object.hasOwn(snapshot, 'openedAt'), false)
+  })
+
+  test('a field with no digits is refused, not read as the epoch', async () => {
+    // Number('') and Number(' ') are both 0, and 0 is finite — so judging the
+    // coerced value cannot tell "the epoch" from "nothing was written here".
+    for (const blank of ['', ' ', '\t']) {
+      const client = fakePort()
+      client.answer('bwReadState', readState('open', blank as unknown as number, '1000'))
+      assert.deepEqual(
+        await redisStore({ client }).readState('api'),
+        { state: 'closed', fence: 0 },
+        `a fence of ${JSON.stringify(blank)} must not read as period zero`
+      )
+    }
+
+    for (const blank of [' ', '\t']) {
+      const client = fakePort()
+      client.answer('bwReadState', readState('open', 4, blank))
+      const snapshot = await redisStore({ client }).readState('api')
+      assert.deepEqual(snapshot, { state: 'open', fence: 4 })
+      assert.equal(Object.hasOwn(snapshot, 'openedAt'), false, 'a blank timing is dropped, not stamped at 1970')
+    }
+
+    // A real zero still reads as a real zero: the clock CAN be at the epoch.
+    const client = fakePort()
+    client.answer('bwReadState', readState('open', 4, '0'))
+    assert.deepEqual(await redisStore({ client }).readState('api'), { state: 'open', fence: 4, openedAt: 0 })
+  })
+
   test('releasing the subscription stops the pushes', async () => {
     const client = subscribablePort()
     const store = redisStore({ client })
@@ -1165,6 +1207,35 @@ describe('fromIoredis() subscriptions', () => {
     await assert.rejects(port.subscribe?.('bw:{api}:c', () => {}) as Promise<unknown>, /redis is down/)
     // The caller never got a release function, so this was the only chance.
     assert.equal(subscriber.listeners.length, 0)
+  })
+
+  test('a release during an in-flight subscribe leaves the channel subscribed', async () => {
+    const subscriber = subscriberDouble()
+    const order: string[] = []
+    let arrive: (() => void) | undefined
+    subscriber.subscribe = async (channel: string) => {
+      order.push(`SUB ${channel}`)
+      await new Promise<void>((resolve) => { arrive = resolve })
+      return 1
+    }
+    subscriber.unsubscribe = async (channel: string) => { order.push(`UNSUB ${channel}`); return 1 }
+    const port = fromIoredis({ defineCommand: () => {} }, subscriber)
+
+    const first = port.subscribe?.('bw:{api}:c', () => {})
+    arrive?.()
+    const release = await (first as Promise<() => void>)
+
+    // A second breaker on the same circuit starts subscribing...
+    const second = port.subscribe?.('bw:{api}:c', () => {})
+    // ...and the first is disposed while that is still in flight. Counting
+    // the newcomer only after its round trip would show zero listeners here
+    // and unsubscribe the channel it is acquiring.
+    release()
+    arrive?.()
+    await second
+
+    assert.equal(order.filter((c) => c.startsWith('UNSUB')).length, 0, 'the surviving listener must keep its channel')
+    assert.equal(subscriber.listeners.length, 1)
   })
 
   test('leaving a channel waits for the last listener on it', async () => {

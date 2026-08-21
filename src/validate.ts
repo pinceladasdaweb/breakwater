@@ -29,6 +29,18 @@ export function assertNonNegative (name: string, value: number): void {
 }
 
 /**
+ * An upper bound that may be Infinity, which is how the backoffs spell "no
+ * bound" — so assertNonNegative, which rejects it as non-finite, cannot stand
+ * in here. NaN and negatives still fail at construction rather than surfacing
+ * later as a bogus delay, on the first retry, in production.
+ */
+export function assertNonNegativeBound (name: string, value: number): void {
+  if (Number.isNaN(value) || !(value >= 0)) {
+    throw new RangeError(`${name} must be a non-negative number or Infinity, got ${value}`)
+  }
+}
+
+/**
  * Guards the string options TypeScript cannot guard for JavaScript callers:
  * a typo in a mode or strategy must fail at construction, not silently
  * select a different behavior.

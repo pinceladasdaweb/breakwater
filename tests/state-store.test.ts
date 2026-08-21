@@ -237,10 +237,14 @@ describe('memoryStore lifecycle and clock', () => {
 describe('memoryStore state transitions', () => {
   test('compareAndSet swaps only from the expected state', () => {
     const store = memoryStore()
-    assert.equal(store.readState('b').state, 'closed')
-    assert.equal(store.compareAndSet('b', 'closed', 'open', 0).ok, true)
-    // The state moved on: the same swap no longer applies.
-    assert.equal(store.compareAndSet('b', 'closed', 'open', 1).ok, false)
+    const start = store.readState('b')
+    assert.equal(start.state, 'closed')
+    assert.equal(store.compareAndSet('b', 'closed', 'open', start.fence).ok, true)
+    // The state moved on: the same swap no longer applies, and carrying the
+    // fence the circuit is on RIGHT NOW isolates that from a stale fence
+    // being the reason it was refused.
+    const current = store.readState('b')
+    assert.equal(store.compareAndSet('b', 'closed', 'open', current.fence).ok, false)
     assert.equal(store.readState('b').state, 'open')
   })
 
@@ -284,11 +288,32 @@ describe('memoryStore state transitions', () => {
 
     store.delete?.('b')
 
-    // Restarting the count would let a swap still in flight across the delete
-    // land on a period several generations later — the very ambiguity the
-    // fence exists to remove.
-    assert.ok(store.readState('b').fence >= before, 'fences must never rewind')
+    // Strictly past it, not merely level with it: `>=` is satisfied by the
+    // reuse itself, which is the one outcome this test exists to catch.
+    assert.ok(store.readState('b').fence > before, 'a recreated name must not reuse its own last fence')
     assert.equal(store.compareAndSet('b', 'closed', 'open', 0).ok, false)
+  })
+
+  test('a swap decided before a delete cannot land on the name that came back', () => {
+    const store = memoryStore()
+
+    // A period that ends in `closed` — the case where the recreated entry's
+    // own state ('closed') would also satisfy the stale swap's `from`.
+    store.compareAndSet('b', 'closed', 'open', store.readState('b').fence)
+    store.compareAndSet('b', 'open', 'half-open', store.readState('b').fence)
+    store.compareAndSet('b', 'half-open', 'closed', store.readState('b').fence)
+
+    // Decided here: "it is closed at this fence, so open it."
+    const decided = store.readState('b').fence
+
+    store.delete?.('b')
+    store.readState('b')
+
+    // Both halves of the guard line up by state name, so only the fence can
+    // tell the caller its period is gone.
+    const outcome = store.compareAndSet('b', 'closed', 'open', decided)
+    assert.equal(outcome.ok, false, 'a decision from the deleted period must not trip the new circuit')
+    assert.equal(outcome.snapshot.state, 'closed')
   })
 
   test('a lost swap reports where the circuit actually is', () => {

@@ -57,7 +57,11 @@ the last handler's error in `cause`.
 
 - Any error, by default.
 - **Cancellation never does** — if the caller aborted, the caller does not
-  want a replacement value; the abort reason propagates.
+  want a replacement value; the failure propagates unchanged (for a function
+  that honours the signal, that failure *is* the abort reason). This is
+  re-checked between handlers too, so a caller that gives up while handler A
+  is running does not pay for B and C — each of which may be a network call
+  of its own.
 - `fallbackIf` narrows it further:
 
 ```ts

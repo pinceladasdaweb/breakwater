@@ -51,6 +51,11 @@ export function fallback<T> (
 
       let lastHandlerError: unknown
       for (const [index, candidate] of handlers.entries()) {
+        // Re-checked per handler, as retry re-checks per attempt: a caller
+        // that aborted while an earlier handler was running must not pay for
+        // the ones still queued behind it, each of which may be a network
+        // call of its own.
+        if (ctx.signal.aborted) throw error
         emitter.emit('fallback', { error, handlerIndex: index, correlationId: ctx.correlationId })
         try {
           const value = typeof candidate === 'function'

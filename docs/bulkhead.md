@@ -107,8 +107,10 @@ app.post('/reports', async (req, res) => {
   ahead. Size the queue for the burst you accept, and pair with an outer
   `timeout` when queue wait must be bounded.
 - **Per-instance, in-memory.** Ten service instances with `concurrency: 20`
-  allow 200 concurrent calls overall. A distributed limit belongs to the
-  planned distributed tooling — `breakwater/redis` shares the circuit
-  breaker's state, not a concurrency limit.
+  allow 200 concurrent calls overall. There is no shared version:
+  [`breakwater/redis`](redis.md) shares the circuit breaker's state and a
+  [rate limit quota](redis.md#sharing-the-rate-limit-too), but not a
+  concurrency limit. If you need to cap concurrency fleet-wide, a shared
+  quota over time is usually the more honest instrument anyway.
 - **One bulkhead per resource, not per call site.** Sharing an instance is
   the whole point — create it once and reuse it.

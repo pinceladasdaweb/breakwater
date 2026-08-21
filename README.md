@@ -321,7 +321,7 @@ See [docs/errors.md](docs/errors.md).
 - [Observability: events, stats & metrics](docs/observability.md)
 - [Prometheus adapter](docs/prometheus.md) — ready-made prom-client collectors + a Grafana dashboard
 - [OpenTelemetry adapter](docs/otel.md) — OTel metrics + spans as a composable policy
-- [Redis: the distributed circuit breaker](docs/redis.md) — one circuit shared across every instance
+- [Redis: distributed state](docs/redis.md) — one circuit, and one rate limit quota, shared across every instance
 - [Errors](docs/errors.md)
 - [Versioning policy](docs/versioning.md) — what the semver promise covers, and what it deliberately does not
 

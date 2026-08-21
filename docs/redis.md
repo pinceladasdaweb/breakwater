@@ -98,6 +98,16 @@ that describes a period the instance has already left is dropped, and every
 execution still reads the state it decides on. Losing one costs freshness,
 not correctness.
 
+That is not a theoretical loss. Redis pub/sub has no delivery guarantee and
+no replay, so anything published while a subscriber is reconnecting is gone
+— and a dropped connection is exactly when a dependency is having trouble
+and peers are tripping. An instance that misses the announcement learns the
+circuit is open on its very next call, because the subscription accelerates
+agreement rather than standing in for it. Which is why the read is never
+skipped just because a subscription is live: invert those two and a lost
+message becomes a fleet that quietly disagrees about whether a dependency
+is down.
+
 Call `breaker.dispose()` to release the subscription when the policy goes
 away; it is safe to call more than once, and the breaker keeps working
 afterwards by going back to reading.
