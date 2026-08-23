@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## 1.1.2 (2026-08-23)
+
+* fix: stretch the bucket's lease to its refill, and quiet the rejection path by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/8dda2d90237686bc9660ee5d763600773cf0102a)
+
+
 ## 1.1.1 (2026-08-21)
 
 * test: pin the read as the authority a lost push cannot replace by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/8fad3f071cff424a97d047cf5afd7a8f88e7e6b1)
