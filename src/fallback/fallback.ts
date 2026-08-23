@@ -17,6 +17,12 @@ export interface FallbackOptions {
 }
 
 export interface FallbackEvents extends Record<string, unknown> {
+  /**
+   * A failure was actually replaced: `handlerIndex` is the handler whose
+   * value went out. Emitted on the rescue, not per attempt — the metric this
+   * feeds counts replacements, and a chain of failing handlers would
+   * otherwise report rescues that never happened.
+   */
   fallback: { error: unknown, handlerIndex: number, correlationId: string }
 }
 
@@ -56,11 +62,11 @@ export function fallback<T> (
         // the ones still queued behind it, each of which may be a network
         // call of its own.
         if (ctx.signal.aborted) throw error
-        emitter.emit('fallback', { error, handlerIndex: index, correlationId: ctx.correlationId })
         try {
           const value = typeof candidate === 'function'
             ? await (candidate as (error: unknown, ctx: ExecutionContext) => T | Promise<T>)(error, ctx)
             : candidate
+          emitter.emit('fallback', { error, handlerIndex: index, correlationId: ctx.correlationId })
           // The policy contract is generic per call while handlers are typed
           // at the factory; the caller guarantees they line up.
           return value as unknown as R

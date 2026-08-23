@@ -110,11 +110,16 @@ const isNumeric = (value: string | undefined): boolean =>
  * has moved on.
  *
  * **Redis is never allowed to become the outage.** A resilience library
- * that fails when its own backend fails has the problem backwards, so no
- * method here rejects: when Redis is unreachable the store answers from
- * this instance's own view and the circuit simply becomes local until it
- * comes back. What that costs while degraded is agreement between
- * instances, not the protection itself.
+ * that fails when its own backend fails has the problem backwards, so
+ * nothing on the breaker's path rejects: when Redis is unreachable the
+ * store answers from this instance's own view and the circuit simply
+ * becomes local until it comes back. What that costs while degraded is
+ * agreement between instances, not the protection itself.
+ *
+ * `delete` is the one exception, because it is the one method the breaker
+ * never calls: it exists for an operator retiring a name, and pretending
+ * the deletion happened would silently lose that action — an isolated
+ * circuit's keys are PERSISTed, so nothing else ever collects them.
  *
  * Two properties are per-instance by design: `getLatency` summarises the
  * calls THIS process made (percentiles are a triage signal, and shipping
@@ -130,7 +135,10 @@ export function redisStore (options: RedisStoreOptions): RedisStore {
   }
   const windowMs = window.size
   const bucketMs = Math.max(1, Math.ceil(windowMs / 10))
-  const ttlMs = options.ttlMs ?? Math.max(windowMs * 4, 60_000)
+  // Ceiled because a fractional window is legal and windowMs * 4 inherits
+  // the fraction — the integer assert below would then reject a default the
+  // caller never chose, naming an option they never passed.
+  const ttlMs = options.ttlMs ?? Math.ceil(Math.max(windowMs * 4, 60_000))
   const probeTtlMs = options.probeTtlMs ?? 10_000
   assertNonEmptyString('prefix', prefix)
   if (prefix.includes('{') || prefix.includes('}')) {
@@ -347,7 +355,16 @@ export function redisStore (options: RedisStoreOptions): RedisStore {
       local.delete?.(name)
       mirror.delete(name)
       mintedBlind.delete(name)
-      await run('bwDelete', [stateKey(name), windowKey(name), probeKey(name)], [], () => undefined, () => undefined)
+      // The one method here that rejects, deliberately. Deleting is a manual
+      // control call, not an admission decision: swallowing a failure would
+      // silently lose an operator's explicit action, and an ISOLATED
+      // circuit's keys are PERSISTed — nothing else ever collects them, so
+      // the retired name would come back isolated on the next read. Forced
+      // past the cooldown for the same reason: a manual call deserves one
+      // real attempt, not a silent skip.
+      await run('bwDelete', [stateKey(name), windowKey(name), probeKey(name)], [], () => undefined, () => {
+        throw new Error(`could not delete circuit "${name}" from redis — its keys survive until the ttl collects them, and an isolated circuit's never expire; retry when redis is reachable`)
+      }, true)
     },
 
     ...(client.subscribe !== undefined && {

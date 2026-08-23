@@ -2,15 +2,7 @@ import { slidingWindow, tokenBucket, type Limiter, type RateLimitDecision, type 
 import { assertNonEmptyString } from '../validate'
 import { type ScriptDefinition, type RedisPort } from './port'
 import { createRunner } from './runner'
-
-/**
- * Reads the server clock, so every instance buckets a call the same way.
- * The same NOW the state store uses.
- */
-const NOW = `
-local t = redis.call('TIME')
-local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
-`
+import { NOW } from './scripts'
 
 /**
  * Tokens refill continuously and a call takes one, all in one atomic step —
@@ -207,11 +199,20 @@ export function redisRateLimit (options: RedisRateLimitOptions): RedisRateLimitS
       quota.strategy === 'token-bucket' ? 'bwTokenBucket' : 'bwSlidingWindow',
       [key(name)],
       quota.strategy === 'token-bucket'
-        ? [quota.limit, quota.interval, quota.burst, Math.ceil(quota.interval * 2)]
+        // The bucket's ttl must cover its time-to-full: refilling from empty
+        // takes burst/limit intervals, and a key that expires sooner hands the
+        // next caller a FULL bucket where honest refill had only accumulated
+        // part of one — a fleet-wide over-admission on every idle gap. At or
+        // past time-to-full, expiry grants exactly what refill would, so the
+        // bound is sufficient. The window keeps 2×: entries older than the
+        // interval are irrelevant by definition.
+        ? [quota.limit, quota.interval, quota.burst, Math.ceil(quota.interval * Math.max(2, quota.burst / quota.limit))]
         : [quota.limit, quota.interval, Math.ceil(quota.interval * 2), `${instanceId}:${++admissions}`],
       (raw) => {
         const [admitted, retryAfterMs, remaining] = raw as [number, number, number]
-        if (typeof admitted !== 'number' || typeof remaining !== 'number') {
+        // All three, not just two: retryAfterMs is the one field that reaches
+        // the caller inside RateLimitedError, and Math.max(1, garbage) is NaN.
+        if (typeof admitted !== 'number' || typeof retryAfterMs !== 'number' || typeof remaining !== 'number') {
           throw new TypeError(`unreadable rate limit decision from redis: ${JSON.stringify(raw)}`)
         }
         return { admitted: admitted === 1, retryAfterMs, remaining }
