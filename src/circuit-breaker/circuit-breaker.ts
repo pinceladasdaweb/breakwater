@@ -204,15 +204,33 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
   // token: it reports the store as of the moment it ran, so it always wins.
   let observeSeq = 0
   let adoptedSeq = 0
+  // One outstanding refresh at a time. snapshot() runs on the REJECTION path
+  // — it builds every CircuitOpenError — so without this an open circuit
+  // under storm fans one counters read out to the store per rejected call:
+  // load against the shared backend at exactly the moment rejections are the
+  // bulk of traffic, for a mirror the next settle refreshes anyway.
+  let countersReadPending = false
+  let latencyReadPending = false
 
   const syncCounters = (): void => {
+    if (countersReadPending) return
     try {
       const counters = store.getCounters(name)
       // An async store feeds the mirror when the read lands; stats() answers
       // synchronously from last-known values either way.
       if (isThenable(counters)) {
+        countersReadPending = true
         const seq = ++countersReadSeq
-        Promise.resolve(counters).then((value) => { if (seq === countersReadSeq) lastCounters = value }, reportStoreError)
+        Promise.resolve(counters).then(
+          (value) => {
+            countersReadPending = false
+            if (seq === countersReadSeq) lastCounters = value
+          },
+          (error) => {
+            countersReadPending = false
+            reportStoreError(error)
+          }
+        )
       } else {
         lastCounters = counters
       }
@@ -222,12 +240,23 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
   }
 
   const syncLatency = (): void => {
+    if (latencyReadPending) return
     if (store.getLatency === undefined) return
     try {
       const latency = store.getLatency(name)
       if (isThenable(latency)) {
+        latencyReadPending = true
         const seq = ++latencyReadSeq
-        Promise.resolve(latency).then((value) => { if (seq === latencyReadSeq) lastLatency = value }, reportStoreError)
+        Promise.resolve(latency).then(
+          (value) => {
+            latencyReadPending = false
+            if (seq === latencyReadSeq) lastLatency = value
+          },
+          (error) => {
+            latencyReadPending = false
+            reportStoreError(error)
+          }
+        )
       } else {
         lastLatency = latency
       }
@@ -385,6 +414,9 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
       await store.recordFailure(name, durationMs)
       lastError = error
       lastCounters = await store.getCounters(name)
+      // This read is fresher than any refresh still in flight — bump the
+      // token so a slower one cannot land on top of it.
+      countersReadSeq++
     } catch (storeError) {
       lastError = error
       reportStoreError(storeError)
@@ -492,16 +524,14 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
   // else will ever publish to: a permanent subscription with nothing to say.
   if (store.subscribe !== undefined && options.name !== undefined) {
     try {
-      // Duck-typed like the rest of the codebase: a store may hand back a
-      // thenable from another realm, and `instanceof` would miss it.
-      const subscription = store.subscribe(name, adoptPush) as (() => void) | PromiseLike<() => void>
-      if (typeof (subscription as PromiseLike<() => void>).then === 'function') {
+      const subscription = store.subscribe(name, adoptPush)
+      if (isThenable(subscription)) {
         Promise.resolve(subscription).then(
           (release) => { if (disposed) release(); else unsubscribe = release },
           reportStoreError
         )
       } else {
-        unsubscribe = subscription as () => void
+        unsubscribe = subscription
       }
     } catch (error) {
       reportStoreError(error)

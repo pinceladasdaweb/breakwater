@@ -30,7 +30,7 @@ describe('fallback()', () => {
     assert.equal(result, 'computed')
   })
 
-  test('walks the chain until a handler succeeds, emitting one event per attempt', async () => {
+  test('walks the chain until a handler succeeds, announcing the one that did', async () => {
     const indexes: number[] = []
     const policy = fallback<string>([
       () => { throw new Error('cache empty') },
@@ -39,7 +39,21 @@ describe('fallback()', () => {
     policy.on('fallback', ({ handlerIndex }) => indexes.push(handlerIndex))
 
     assert.equal(await policy.execute(() => { throw new Error('down') }), 'from second handler')
-    assert.deepEqual(indexes, [0, 1])
+    // One rescue, one event: the metric this feeds counts replacements, and
+    // an event per attempt would report rescues that never went out.
+    assert.deepEqual(indexes, [1])
+  })
+
+  test('a chain that fails outright announces no rescue at all', async () => {
+    let events = 0
+    const policy = fallback<string>([
+      () => { throw new Error('handler A failed') },
+      () => { throw new Error('handler B failed') }
+    ])
+    policy.on('fallback', () => events++)
+
+    await assert.rejects(policy.execute(() => { throw new Error('down') }))
+    assert.equal(events, 0, 'nothing was replaced, so nothing gets counted as a rescue')
   })
 
   test('throws FallbackFailedError when the whole chain fails', async () => {

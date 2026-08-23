@@ -4,8 +4,12 @@ import { type ScriptDefinition } from './port'
  * Reads the server clock. Every instance sharing a circuit then agrees on
  * when its open period started and which bucket a call lands in — the whole
  * point of moving the timing off the individual process.
+ *
+ * Exported because the rate limit store buckets by the same clock: the
+ * millisecond arithmetic here is a decision both stores must agree on, and
+ * two copies of it can drift apart one fix at a time.
  */
-const NOW = `
+export const NOW = `
 local t = redis.call('TIME')
 local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 `

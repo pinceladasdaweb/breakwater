@@ -88,6 +88,10 @@ describe('redisStore() options', () => {
     assert.throws(() => redisStore({ client, probeTtlMs: 1.5 }), { name: 'RangeError', message: /probeTtlMs/ })
     assert.throws(() => redisStore({ client, probeTtlMs: -1 }), { name: 'RangeError', message: /probeTtlMs/ })
     assert.throws(() => redisStore({ client, degradeForMs: Number.NaN }), { name: 'RangeError', message: /degradeForMs/ })
+    // A fractional WINDOW is legal, and the ttl default derives from it: the
+    // default must round itself rather than fail the integer check above in
+    // the name of an option the caller never passed.
+    assert.doesNotThrow(() => redisStore({ client, window: timeWindow(20_000.5) }))
   })
 
   test('every script is registered up front, and each declares its key count', () => {
@@ -297,7 +301,21 @@ describe('redisStore() when Redis is unreachable', () => {
     await store.recordSuccess('down', 5)
     assert.equal((await store.getCounters('down')).totalCalls, 2)
     await store.resetCounters('down')
-    await store.delete?.('down')
+  })
+
+  test('delete is the exception: a deletion redis cannot confirm rejects', async () => {
+    const client = fakePort()
+    client.fail()
+    const store = redisStore({ client, onDegraded: () => {} })
+
+    // The breaker never calls delete — it is an operator retiring a name,
+    // and pretending it happened would silently lose that action: an
+    // isolated circuit's keys are PERSISTed, so nothing else collects them.
+    await assert.rejects(async () => { await store.delete?.('down') }, /could not delete circuit "down"/)
+
+    // And the cooldown does not swallow it either: a manual call gets a
+    // real attempt, and a real answer.
+    await assert.rejects(async () => { await store.delete?.('down') }, /could not delete/)
   })
 
   test('degrading keeps the last state everyone agreed on, instead of reopening the floodgates', async (t) => {
@@ -849,7 +867,8 @@ describe('redisRateLimit()', () => {
     assert.deepEqual(client.calls[0], {
       script: 'bwTokenBucket',
       keys: ['bwrl:{api}'],
-      // limit, interval, capacity, ttl
+      // limit, interval, capacity, ttl — a small burst refills within two
+      // intervals, so the floor of 2× covers it.
       args: [10, 1_000, 4, 2_000]
     })
 
@@ -871,9 +890,41 @@ describe('redisRateLimit()', () => {
     assert.deepEqual(await store.acquire('api', quota), { admitted: false, retryAfterMs: 137, remaining: 0 })
   })
 
+  test("the bucket's ttl covers its time-to-full, so idling never mints a burst early", async () => {
+    const client = fakePort()
+    client.answer('bwTokenBucket', [1, 0, 99])
+    const store = redisRateLimit({ client })
+
+    // Refilling 100 tokens at 10/interval takes 10 intervals: a key that
+    // expired at 2× would hand the next caller a FULL bucket where honest
+    // refill had accumulated a fifth of one.
+    await store.acquire('api', { limit: 10, interval: 1_000, strategy: 'token-bucket', burst: 100 })
+    assert.deepEqual(client.calls[0]?.args, [10, 1_000, 100, 10_000])
+  })
+
+  test('a reply with an unreadable retryAfterMs is refused, not passed to the caller', async (t) => {
+    const reported = t.mock.method(console, 'error', () => {})
+    const client = fakePort()
+    // admitted and remaining are numbers, so the old guard passed this —
+    // and Math.max(1, 'x') would have handed the caller a NaN retryAfterMs.
+    client.answer('bwTokenBucket', [0, 'x', 0])
+    const store = redisRateLimit({ client })
+
+    const decision = await store.acquire('api', quota)
+    // Answered by the local limiter instead: a fresh bucket admits.
+    assert.equal(decision.admitted, true)
+    assert.ok(
+      reported.mock.calls.some((call) => String(call.arguments[0]).includes('unexpected reply')),
+      'the unreadable reply is reported, not silently rewritten'
+    )
+  })
+
   test('a shared quota keyed under one hash tag, and a prefix that cannot steal it', () => {
     assert.throws(() => redisRateLimit({ client: fakePort(), prefix: 'app:{prod}:' }), { name: 'RangeError', message: /braces/ })
     assert.throws(() => redisRateLimit({ client: fakePort(), prefix: '' }), { name: 'RangeError', message: /prefix/ })
+    // Either brace alone is enough to move the hash slot.
+    assert.throws(() => redisRateLimit({ client: fakePort(), prefix: 'app:{' }), { name: 'RangeError', message: /braces/ })
+    assert.throws(() => redisRateLimit({ client: fakePort(), prefix: 'app:}' }), { name: 'RangeError', message: /braces/ })
   })
 
   test('when Redis is unreachable the quota becomes local, and still holds', async () => {

@@ -34,9 +34,9 @@ exactly as before; only where the state lives has changed.
 ## Redis is never allowed to become the outage
 
 A resilience library that stops working when its own backend does has the
-problem backwards. So **no method of this store ever rejects**. When Redis is
-unreachable, the store answers from what this instance already knows and the
-circuit simply becomes local until Redis comes back:
+problem backwards. So **nothing on the breaker's path ever rejects**. When
+Redis is unreachable, the store answers from what this instance already knows
+and the circuit simply becomes local until Redis comes back:
 
 - the last state everyone agreed on is kept — a circuit that was open across
   the fleet does not spring closed and send the outage downstream;
@@ -161,6 +161,13 @@ without a `name` gets a random one — useless here. Retiring a dynamic name?
 Call `store.delete(name)`. `ttlMs` reclaims the Redis keys on its own, but
 the in-process mirror and local counters are only pruned by `delete()` (or
 `close()`), so a per-tenant or per-host naming scheme needs it.
+
+`delete()` is also the one method of this store that **rejects** when Redis
+cannot confirm it. It is a manual control call, not an admission decision:
+pretending the deletion happened would silently lose an operator's explicit
+action — and an isolated circuit's keys are PERSISTed, so nothing else ever
+collects them and the retired name would come back isolated on the next
+read. Catch the error and retry when Redis is reachable.
 
 ## What a shared circuit cannot promise
 

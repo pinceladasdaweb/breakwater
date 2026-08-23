@@ -75,10 +75,13 @@ const policy = fallback(DEFAULT, {
 
 | Event | Payload | When |
 |---|---|---|
-| `fallback` | `{ error, handlerIndex, correlationId }` | Before each handler in the chain runs |
+| `fallback` | `{ error, handlerIndex, correlationId }` | A failure was actually replaced — `handlerIndex` is the handler whose value went out |
 
-A chain that succeeds on the second handler emits the event twice
-(`handlerIndex: 0`, then `1`) — you can see exactly how degraded you are.
+One rescue, one event. A chain that succeeds on the second handler emits it
+once with `handlerIndex: 1` — the index tells you how degraded you are — and
+a chain where every handler fails emits nothing, because nothing was
+replaced: the caller got `FallbackFailedError`, and a metric counting rescues
+that never happened would overstate resilience exactly when it is failing.
 
 ## Serving stale data instead: `staleCache`
 

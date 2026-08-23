@@ -40,7 +40,7 @@ The full event catalog:
 | circuit breaker | `success` / `failure` | `{ durationMs, correlationId }` (+ `error` on failure) |
 | bulkhead | `reject` | `{ stats, correlationId }` |
 | rate limit | `reject` | `{ stats, retryAfterMs, correlationId }` |
-| fallback | `fallback` | `{ error, handlerIndex, correlationId }` |
+| fallback | `fallback` | `{ error, handlerIndex, correlationId }` — emitted on the rescue, not per attempt |
 | stale cache | `stale` | `{ key, ageMs, error, correlationId }` |
 | stale cache | `miss` | `{ key, error, correlationId }` |
 

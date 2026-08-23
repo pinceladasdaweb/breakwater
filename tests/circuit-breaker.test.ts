@@ -958,6 +958,39 @@ describe('shared state store', () => {
     breaker.dispose()
   })
 
+  test('a storm of rejections shares one counters read, not one each', async () => {
+    let reads = 0
+    let settle: ((value: WindowCounters) => void) | undefined
+    const counters: WindowCounters = { successes: 0, failures: 5, totalCalls: 5, failureRate: 1 }
+    const inner = memoryStore({ window: countWindow(10) })
+    const store: StateStore = {
+      ...inner,
+      readState: async () => ({ state: 'open', fence: 1, openedAt: Date.now() }),
+      // An async store: every snapshot() would otherwise fan a read out to
+      // the backend per rejected call — during the incident, when rejections
+      // ARE the traffic.
+      getCounters: async () => await new Promise<WindowCounters>((resolve) => {
+        reads++
+        settle = resolve
+      }),
+      acquireProbe: async () => true
+    }
+    const breaker = circuitBreaker({ name: 'storm', halfOpenAfter: 60_000, stateStore: store })
+
+    for (let i = 0; i < 5; i++) {
+      await assert.rejects(breaker.execute(() => 'never runs'), isCircuitOpenError)
+    }
+    assert.equal(reads, 1, 'four rejections rode the read the first one dispatched')
+
+    // The settle both feeds the mirror and frees the next refresh.
+    settle?.(counters)
+    await drain()
+    assert.equal(breaker.stats().failures, 5)
+    await assert.rejects(breaker.execute(() => 'never runs'), isCircuitOpenError)
+    assert.equal(reads, 2)
+    breaker.dispose()
+  })
+
   test('counters arriving as a foreign thenable still reach stats()', async () => {
     const inner = memoryStore({ window: countWindow(10) })
     // Not a native Promise: another realm, a userland promise library, a
@@ -1462,15 +1495,15 @@ describe('async store hardening', () => {
     }
     const breaker = circuitBreaker({ name: 'ooo-reads', stateStore: store })
 
-    // Read #1 dispatches against an empty window and stalls...
+    // Two overlapping REFRESHES can no longer race — refreshes are
+    // single-flight — so the pair left to guard is a stalled refresh against
+    // onFailure's direct read, which the failure path must win.
     const { promise: held, resolve: release } = Promise.withResolvers<void>()
     holdFirst = held
     breaker.stats()
 
-    // ...a call lands and read #2 (fast) feeds the mirror with 1 call.
-    await breaker.execute(() => 'ok')
-    breaker.stats()
-    await drain()
+    // A failure lands while the refresh is stalled: its own read is fresher.
+    await assert.rejects(breaker.execute(() => { throw new Error('down') }))
     assert.equal(breaker.stats().totalCalls, 1)
 
     // The stale empty read lands last: the mirror must not go back to 0.
