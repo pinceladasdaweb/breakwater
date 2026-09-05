@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## 1.1.3 (2026-09-05)
+
+* fix: never pretend a manual transition, and forget a circuit only once redis has by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/3ebd1cb97e6419b55286143288b8dfa6f391069b)
+
+
 ## 1.1.2 (2026-08-23)
 
 * fix: stretch the bucket's lease to its refill, and quiet the rejection path by Pedro Rogério [View](https://github.com/pinceladasdaweb/breakwater/commit/8dda2d90237686bc9660ee5d763600773cf0102a)
