@@ -178,6 +178,11 @@ Three limits worth knowing before you rely on this in an incident:
   isolated. It gets one bounded attempt to ask, and if that fails it admits
   traffic rather than rejecting everything it knows nothing about. If an
   isolation must hold through a Redis outage, pair it with a deploy-time flag.
+  And the switch is never pretended: `isolate()` and `unisolate()` **reject**
+  when Redis cannot commit them, instead of reporting a kill switch that only
+  this instance ever saw and that the next real read would silently undo.
+  They try Redis regardless of the cooldown — catch, and retry when it
+  answers. `delete()` follows the same rule.
 - **The cooldown compares two clocks.** `openedAt` comes from the Redis
   server so every instance agrees on it, but whether it has elapsed is judged
   against each instance's own clock. Large skew shifts when probing starts —

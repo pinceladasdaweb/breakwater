@@ -51,7 +51,11 @@ Semantics that keep configuration honest:
   `paymnets` fails at wiring time with the fix in the message.
 - **Same name, same instance** — every `get('payments-api')` returns the
   same policy, so the circuit breaker state is genuinely shared across
-  modules. That is the point.
+  modules. That is the point. Within one copy of breakwater, that is: a
+  process that loads both the ESM and CJS builds, or two versions under
+  separate `node_modules` paths, holds two default registries, and a name
+  defined in one is unknown to the other. A library should take the registry
+  (or the policy) as a parameter rather than reach for the shared `policies`.
 - **`delete` and `clear` release what the registry built** — they call
   [`dispose()`](composition.md#releasing-a-pipeline-with-dispose)
   on the pipelines they created from options, because the registry is their

@@ -144,5 +144,12 @@ export function createPolicyRegistry (initial?: Record<string, ResilienceOptions
  * The default shared registry. Applications with a single policy
  * configuration can use it directly; libraries and multi-tenant setups
  * should create their own with createPolicyRegistry().
+ *
+ * "Shared" means shared within one copy of this module. A process that loads
+ * both the ESM and CJS builds, or two versions under separate paths, holds
+ * two registries, and a name defined in one is unknown to the other — the
+ * same boundary the error type guards stop at. A library should never rely
+ * on this instance to find an application's policies; take the registry (or
+ * the policy) as a parameter instead.
  */
 export const policies = createPolicyRegistry()

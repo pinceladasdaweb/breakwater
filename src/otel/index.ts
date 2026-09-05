@@ -254,6 +254,10 @@ export function spanPolicy (options: SpanPolicyOptions = {}): SpanPolicy {
     // is the SDK's (a broken context manager), not the execution's, and
     // must be contained.
     let entered = false
+    // fn's own promise, kept from inside the callback: a context manager can
+    // also throw AFTER running it (a broken exit hook), and the execution's
+    // real outcome then lives here, not in what context.with rejected with.
+    let outcome: Promise<unknown> | undefined
     try {
       if (span === undefined || activeContext === undefined) {
         entered = true
@@ -261,13 +265,31 @@ export function spanPolicy (options: SpanPolicyOptions = {}): SpanPolicy {
       }
       return await context.with(activeContext, () => {
         entered = true
-        return fn(ctx)
+        const started = Promise.resolve(fn(ctx))
+        outcome = started
+        return started
       })
     } catch (error) {
       if (!entered) {
         console.error('breakwater: opentelemetry context threw', error)
         try {
           return await fn(ctx)
+        } catch (fnError) {
+          if (span !== undefined) recordOutcome(span, fnError)
+          throw fnError
+        }
+      }
+      if (outcome !== undefined) {
+        // The callback ran, so fn's promise holds the truth. If it rejects,
+        // that IS the error we caught and it propagates as before; if it
+        // resolves, the rejection came from the context manager leaving, and
+        // tracing must not turn a success into a failure.
+        try {
+          const value = await outcome
+          console.error('breakwater: opentelemetry context threw after the execution', error)
+          // The stash is untyped only because T is not nameable in this
+          // scope; it holds exactly what fn resolved with.
+          return value as Awaited<ReturnType<typeof fn>>
         } catch (fnError) {
           if (span !== undefined) recordOutcome(span, fnError)
           throw fnError

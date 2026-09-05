@@ -118,6 +118,13 @@ breaker.state              // 'closed' | 'open' | 'half-open' | 'isolated'
 breaker.stats()            // snapshot, see below
 ```
 
+With a [shared store](redis.md), `isolate()` and `unisolate()` ask for
+**confirmation**: if the backend cannot commit the transition they reject,
+rather than report a kill switch that only ever existed on this instance and
+would evaporate on the next real read. Catch the error and retry when the
+store answers. The in-memory store is its own authority, so there the calls
+never reject.
+
 `stats()` is synchronous and answers the 3 a.m. questions:
 
 ```ts

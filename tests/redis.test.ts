@@ -303,19 +303,96 @@ describe('redisStore() when Redis is unreachable', () => {
     await store.resetCounters('down')
   })
 
-  test('delete is the exception: a deletion redis cannot confirm rejects', async () => {
+  test('delete is the exception: a deletion redis cannot confirm rejects, and forgets nothing', async () => {
     const client = fakePort()
-    client.fail()
+    client.answer('bwReadState', readState('isolated', 4))
     const store = redisStore({ client, onDegraded: () => {} })
+    assert.equal((await store.readState('down')).state, 'isolated')
 
     // The breaker never calls delete — it is an operator retiring a name,
     // and pretending it happened would silently lose that action: an
     // isolated circuit's keys are PERSISTed, so nothing else collects them.
+    client.fail()
     await assert.rejects(async () => { await store.delete?.('down') }, /could not delete circuit "down"/)
 
+    // A failed deletion must leave this instance knowing what it knew: the
+    // circuit is still isolated for the whole fleet, and an instance that
+    // had forgotten it would answer 'closed' from inside the cooldown.
+    assert.equal((await store.readState('down')).state, 'isolated', 'the mirror survives a deletion redis did not confirm')
+
     // And the cooldown does not swallow it either: a manual call gets a
-    // real attempt, and a real answer.
+    // real attempt, and a real answer. Observed at the port, not inferred
+    // from the rejection — a skipped call would reject with the same message.
+    const attemptsBefore = client.calls.filter((call) => call.script === 'bwDelete').length
     await assert.rejects(async () => { await store.delete?.('down') }, /could not delete/)
+    assert.equal(
+      client.calls.filter((call) => call.script === 'bwDelete').length,
+      attemptsBefore + 1,
+      'the retry inside the cooldown still went to redis'
+    )
+  })
+
+  test('a deletion redis confirmed is forgotten here too', async () => {
+    const client = fakePort()
+    client.answer('bwReadState', readState('isolated', 4))
+    client.answer('bwDelete', 3)
+    const store = redisStore({ client, onDegraded: () => {} })
+    assert.equal((await store.readState('gone')).state, 'isolated')
+
+    await store.delete?.('gone')
+
+    // The mirror must go with the keys: otherwise this instance, once
+    // degraded, would keep answering 'isolated' for a circuit that no longer
+    // exists anywhere — a retired name refusing traffic from beyond the grave.
+    client.fail()
+    assert.equal((await store.readState('gone')).state, 'closed', 'an unknown name, not a remembered one')
+  })
+
+  test('isolate and unisolate are never pretended: unconfirmed, they reject', async (t) => {
+    t.mock.method(console, 'error', () => {})
+    const client = fakePort()
+    client.answer('bwReadState', readState('closed', 0))
+    const store = redisStore({ client, onDegraded: () => {} })
+    const breaker = circuitBreaker({ name: 'kill-switch', stateStore: store })
+    assert.equal(await breaker.execute(() => 'ok'), 'ok')
+
+    client.fail()
+    // Answering from local state here would announce a fleet-wide kill switch
+    // that Redis never heard of — and that the next real read after recovery
+    // would silently undo. The operator is owed the failure instead.
+    await assert.rejects(breaker.isolate(), /could not commit closed -> isolated/)
+    assert.equal(breaker.state, 'closed', 'nothing was pretended locally either')
+    assert.equal((await store.readState('kill-switch')).state, 'closed')
+
+    // The same rule on the way out, once it IS isolated for real.
+    client.heal()
+    client.answer('bwReadState', readState('isolated', 7))
+    client.answer('bwCompareAndSet', casReply(1, 'isolated', 7, ''))
+    await breaker.isolate()
+    assert.equal(breaker.state, 'isolated')
+
+    client.fail()
+    await assert.rejects(breaker.unisolate(), /could not commit isolated -> closed/)
+    assert.equal(breaker.state, 'isolated')
+    breaker.dispose()
+  })
+
+  test('a snapshot handed to a caller is a copy, not the mirror', async () => {
+    const client = fakePort()
+    client.answer('bwReadState', readState('open', 3, '1000'))
+    const store = redisStore({ client, onDegraded: () => {} })
+
+    const first = await store.readState('api')
+    ;(first as { state: string }).state = 'closed'
+    // The mirror is the authority while degraded; a consumer editing its own
+    // result must not be editing that.
+    client.fail()
+    assert.equal((await store.readState('api')).state, 'open')
+
+    // Nor the shared default every unknown name answers from while blind.
+    const blind = await store.readState('never-seen')
+    ;(blind as { state: string }).state = 'open'
+    assert.equal((await store.readState('never-seen-either')).state, 'closed')
   })
 
   test('degrading keeps the last state everyone agreed on, instead of reopening the floodgates', async (t) => {

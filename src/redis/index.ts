@@ -87,7 +87,10 @@ export interface RedisStore extends StateStore {
   close: () => void
 }
 
-const CLOSED: StateSnapshot = { state: 'closed', fence: 0 }
+// Frozen, and only ever handed out as a copy: this is what every unknown
+// circuit answers from while blind, so a caller mutating one returned
+// snapshot must not rewrite the default for all of them.
+const CLOSED: Readonly<StateSnapshot> = Object.freeze({ state: 'closed', fence: 0 })
 const KNOWN_STATES = new Set<string>(['closed', 'open', 'half-open', 'isolated'])
 
 /**
@@ -116,10 +119,14 @@ const isNumeric = (value: string | undefined): boolean =>
  * becomes local until it comes back. What that costs while degraded is
  * agreement between instances, not the protection itself.
  *
- * `delete` is the one exception, because it is the one method the breaker
- * never calls: it exists for an operator retiring a name, and pretending
- * the deletion happened would silently lose that action — an isolated
- * circuit's keys are PERSISTed, so nothing else ever collects them.
+ * Manual control calls are the exception: `delete`, and a compare-and-set
+ * asked for with `confirm` (which is how the breaker's `isolate()` and
+ * `unisolate()` arrive). Those exist for an operator, not for admission, and
+ * pretending they happened would silently lose the action — a kill switch
+ * that only this instance ever saw evaporates on the next real read, and a
+ * deleted-but-not-deleted isolated circuit's keys are PERSISTed, so nothing
+ * else ever collects them. They try Redis regardless of the cooldown, and
+ * reject when it cannot commit.
  *
  * Two properties are per-instance by design: `getLatency` summarises the
  * calls THIS process made (percentiles are a triage signal, and shipping
@@ -203,12 +210,17 @@ export function redisStore (options: RedisStoreOptions): RedisStore {
   // the source of the latency percentiles either way.
   let local = memoryStore({ window })
 
+  // The mirror keeps its own copy and callers get their own: a snapshot is a
+  // plain object on a public method, and the in-memory store already builds a
+  // fresh one per read — with a shared store the alternative is a consumer
+  // mutating its result and rewriting the authority this instance decides
+  // from while degraded.
   const remember = (name: string, snapshot: StateSnapshot): StateSnapshot => {
-    mirror.set(name, snapshot)
+    mirror.set(name, { ...snapshot })
     return snapshot
   }
 
-  const known = (name: string): StateSnapshot => mirror.get(name) ?? CLOSED
+  const known = (name: string): StateSnapshot => ({ ...(mirror.get(name) ?? CLOSED) })
 
   // Fences minted while blind share Redis's numeric space, and both sides
   // advance for the same reason — the dependency failing — so they drift into
@@ -295,11 +307,14 @@ export function redisStore (options: RedisStoreOptions): RedisStore {
       )
     },
 
-    compareAndSet: async (name, from, to, fence) => {
-      if (!isSkipping() && mintedBlind.get(name) === fence) {
+    compareAndSet: async (name, from, to, fence, options) => {
+      const confirm = options?.confirm === true
+      if (!confirm && !isSkipping() && mintedBlind.get(name) === fence) {
         // Redis is back but this fence was invented while it was away: refuse
         // rather than gamble on the numbers coinciding. The breaker re-reads
-        // the real state on its next call.
+        // the real state on its next call. A confirmed swap skips this and
+        // asks Redis outright — its answer is the truth being asked for, and
+        // a stale fence simply loses there.
         return { ok: false, snapshot: known(name) }
       }
       return await run(
@@ -311,7 +326,17 @@ export function redisStore (options: RedisStoreOptions): RedisStore {
           mintedBlind.delete(name)
           return { ok: ok === 1, snapshot: remember(name, asSnapshot([state, nextFence, openedAt])) }
         },
-        () => localCas(name, from, to, fence)
+        // A manual transition is never pretended: isolating here, alone,
+        // would report a fleet-wide kill switch that Redis never heard of
+        // and that the next real read silently undoes. Forced past the
+        // cooldown for the same reason — the operator is owed one real
+        // attempt and one real answer.
+        confirm
+          ? () => {
+              throw new Error(`could not commit ${from} -> ${to} for circuit "${name}": redis is unreachable, and a manual transition is not pretended locally — retry when it answers`)
+            }
+          : () => localCas(name, from, to, fence),
+        confirm
       )
     },
 
@@ -352,19 +377,21 @@ export function redisStore (options: RedisStoreOptions): RedisStore {
     ),
 
     delete: async (name) => {
-      local.delete?.(name)
-      mirror.delete(name)
-      mintedBlind.delete(name)
-      // The one method here that rejects, deliberately. Deleting is a manual
-      // control call, not an admission decision: swallowing a failure would
-      // silently lose an operator's explicit action, and an ISOLATED
-      // circuit's keys are PERSISTed — nothing else ever collects them, so
-      // the retired name would come back isolated on the next read. Forced
-      // past the cooldown for the same reason: a manual call deserves one
-      // real attempt, not a silent skip.
+      // Rejects, deliberately, like every manual control call here: swallowing
+      // a failure would silently lose an operator's explicit action, and an
+      // ISOLATED circuit's keys are PERSISTed — nothing else ever collects
+      // them, so the retired name would come back isolated on the next read.
+      // Forced past the cooldown for the same reason: one real attempt.
       await run('bwDelete', [stateKey(name), windowKey(name), probeKey(name)], [], () => undefined, () => {
         throw new Error(`could not delete circuit "${name}" from redis — its keys survive until the ttl collects them, and an isolated circuit's never expire; retry when redis is reachable`)
       }, true)
+      // Forgotten only once Redis has: a failed deletion must leave this
+      // instance knowing what it knew, or a circuit still isolated for the
+      // whole fleet reads as unknown here — and unknown, inside the cooldown,
+      // is answered with closed.
+      local.delete?.(name)
+      mirror.delete(name)
+      mintedBlind.delete(name)
     },
 
     ...(client.subscribe !== undefined && {

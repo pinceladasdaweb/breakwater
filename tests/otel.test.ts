@@ -465,6 +465,42 @@ describe('spanPolicy()', () => {
     assert.throws(() => spanPolicy({ spanName: '' }), { name: 'RangeError', message: /spanName/ })
   })
 
+  test('a context manager that throws AFTER running fn cannot rewrite its outcome', async (t) => {
+    const reported = t.mock.method(console, 'error', () => {})
+    // Runs the callback — so fn genuinely executes — and then explodes while
+    // leaving: a broken exit hook, an interop shim. The `entered` flag alone
+    // cannot tell this from fn itself failing.
+    const brokenOnExit = {
+      active: () => contextManager.active(),
+      with: <A extends unknown[], F extends (...args: A) => unknown>(_c: unknown, fn: F, thisArg?: unknown, ...args: A) => {
+        fn.call(thisArg, ...args)
+        throw new Error('context manager exploded on exit')
+      },
+      bind: <T>(_c: unknown, target: T) => target,
+      enable () { return this },
+      disable () { return this }
+    }
+    const bareProvider = new BasicTracerProvider()
+    context.disable()
+    context.setGlobalContextManager(brokenOnExit)
+    try {
+      const policy = spanPolicy({ name: 'api', tracerProvider: bareProvider })
+      let ran = 0
+
+      // fn succeeded: the caller must get its value, not the manager's error.
+      assert.equal(await policy.execute(() => { ran++; return 'ok' }), 'ok')
+      assert.equal(ran, 1, 'and it ran exactly once — no retry on top of a completed execution')
+      assert.equal(reported.mock.callCount(), 1, 'the manager\'s throw is reported, not swallowed')
+
+      // fn failed: its OWN error propagates, still not the manager's.
+      await assert.rejects(policy.execute(() => { throw new Error('real failure') }), { message: 'real failure' })
+    } finally {
+      context.disable()
+      context.setGlobalContextManager(contextManager)
+      await bareProvider.shutdown()
+    }
+  })
+
   test('a throwing context manager is contained and the execution still runs', async (t) => {
     const reported = t.mock.method(console, 'error', () => {})
     const broken = {

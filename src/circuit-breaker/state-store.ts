@@ -54,6 +54,22 @@ export interface StateSnapshot {
   openedAt?: number
 }
 
+/** How a compare-and-set is being asked for. */
+export interface CasOptions {
+  /**
+   * The swap is a manual control call — `isolate()`, `unisolate()` — rather
+   * than an admission decision, and must not be pretended. A store that would
+   * otherwise answer from local state while its backend is unreachable must
+   * try the backend anyway and reject when it cannot commit: a kill switch
+   * that only ever existed on this instance, and evaporates on the next real
+   * read, is worse than one that honestly failed to engage.
+   *
+   * A store with no backend to confirm against (the in-memory one) ignores
+   * this — it IS the authority. Admission-path swaps never set it.
+   */
+  confirm?: boolean
+}
+
 /** The result of a fenced compare-and-set: did it swap, and where is the world now. */
 export interface CasOutcome {
   ok: boolean
@@ -97,8 +113,12 @@ export interface StateStore {
    * On success the store mints a new fence and stamps the period's
    * `openedAt` (set when entering `open`, carried into `half-open`, cleared
    * otherwise). Never throws to signal a lost race — that is `ok: false`.
+   *
+   * `options.confirm` marks a manual transition that must not be answered
+   * from local state: a distributed store rejects instead when its backend
+   * cannot commit it. Stores may ignore the parameter entirely.
    */
-  compareAndSet: (name: string, from: BreakerState, to: BreakerState, fence: number) => CasOutcome | Promise<CasOutcome>
+  compareAndSet: (name: string, from: BreakerState, to: BreakerState, fence: number, options?: CasOptions) => CasOutcome | Promise<CasOutcome>
   recordSuccess: (name: string, durationMs: number) => void | Promise<void>
   recordFailure: (name: string, durationMs: number) => void | Promise<void>
   getCounters: (name: string) => WindowCounters | Promise<WindowCounters>
