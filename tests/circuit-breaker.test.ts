@@ -991,6 +991,57 @@ describe('shared state store', () => {
     breaker.dispose()
   })
 
+  test('a refresh that fails frees the next one instead of jamming the mirror', async (t) => {
+    t.mock.method(console, 'error', () => {})
+    let reads = 0
+    const inner = memoryStore({ window: countWindow(10) })
+    const store: StateStore = {
+      ...inner,
+      getCounters: async (name) => {
+        reads++
+        if (reads === 1) throw new Error('redis hiccup')
+        return inner.getCounters(name)
+      }
+    }
+    const breaker = circuitBreaker({ name: 'unjam', stateStore: store })
+
+    // The rejected read must hand the single-flight slot back, or every
+    // later stats() would be skipped as "already in flight" for good.
+    breaker.stats()
+    await drain()
+    breaker.stats()
+    await drain()
+    assert.equal(reads, 2, 'the second refresh was allowed to dispatch')
+    breaker.dispose()
+  })
+
+  test('latency refreshes are single-flight too', async () => {
+    let reads = 0
+    let settle: ((value: LatencyStats) => void) | undefined
+    const inner = memoryStore({ window: countWindow(10) })
+    const store: StateStore = {
+      ...inner,
+      getLatency: async () => await new Promise<LatencyStats>((resolve) => {
+        reads++
+        settle = resolve
+      })
+    }
+    const breaker = circuitBreaker({ name: 'latency-storm', stateStore: store })
+
+    // A health endpoint polling stats() while one summary is still in flight
+    // must not stack a second, third and fourth summary behind it.
+    breaker.stats()
+    breaker.stats()
+    breaker.stats()
+    assert.equal(reads, 1)
+
+    settle?.({ count: 2, min: 1, max: 3, mean: 2, p50: 2, p95: 3, p99: 3 })
+    await drain()
+    assert.equal(breaker.stats().latency?.count, 2, 'the settled summary is what stats() reports')
+    assert.equal(reads, 2, 'and the settle let the next refresh go')
+    breaker.dispose()
+  })
+
   test('counters arriving as a foreign thenable still reach stats()', async () => {
     const inner = memoryStore({ window: countWindow(10) })
     // Not a native Promise: another realm, a userland promise library, a
@@ -1485,12 +1536,16 @@ describe('async store hardening', () => {
     const store: StateStore = {
       ...inner,
       async getCounters (name) {
+        // Captured BEFORE the stall, so what lands late is genuinely what the
+        // window held when the read was dispatched — reading after the wait
+        // would return fresh numbers and prove nothing about staleness.
+        const value = inner.getCounters(name)
         if (holdFirst !== undefined) {
           const held = holdFirst
           holdFirst = undefined
           await held
         }
-        return inner.getCounters(name)
+        return value
       }
     }
     const breaker = circuitBreaker({ name: 'ooo-reads', stateStore: store })

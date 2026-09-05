@@ -88,8 +88,14 @@ export interface CircuitBreakerPolicy extends Policy, Observable<CircuitBreakerE
   /**
    * Opens the circuit manually (feature flag / maintenance). Unlike `open`,
    * the `isolated` state never expires — only unisolate() leaves it.
+   *
+   * With a shared store this is asked for with confirmation: if the backend
+   * cannot commit the transition, the call rejects instead of reporting a
+   * kill switch that only ever existed on this instance and would evaporate
+   * on the next real read. Catch, and retry when the store answers.
    */
   isolate: () => Promise<void>
+  /** Leaves `isolated`, back to `closed`. Confirmed like isolate(). */
   unisolate: () => Promise<void>
   /** Clears counters and returns to closed (e.g. after a reconnection). */
   reset: () => Promise<void>
@@ -564,7 +570,7 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
         const current = await observe()
         if (current.state === 'isolated') return
 
-        const outcome = await store.compareAndSet(name, current.state, 'isolated', current.fence)
+        const outcome = await store.compareAndSet(name, current.state, 'isolated', current.fence, { confirm: true })
         adopt(outcome.snapshot)
         if (outcome.ok) {
           changeState(current.state, 'isolated')
@@ -578,7 +584,7 @@ export function circuitBreaker (options: CircuitBreakerOptions = {}): CircuitBre
       const current = await observe()
       if (current.state !== 'isolated') return
 
-      const outcome = await store.compareAndSet(name, 'isolated', 'closed', current.fence)
+      const outcome = await store.compareAndSet(name, 'isolated', 'closed', current.fence, { confirm: true })
       adopt(outcome.snapshot)
       if (!outcome.ok) return
 
