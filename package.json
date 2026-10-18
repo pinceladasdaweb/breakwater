@@ -131,7 +131,7 @@
     "eslint": "^9.39.5",
     "ioredis": "^6.0.0",
     "lint-staged": "^17.2.0",
-    "neostandard": "^0.13.0",
+    "neostandard": "^0.14.0",
     "prom-client": "^15.1.3",
     "rollup": "^4.62.2",
     "rollup-plugin-dts": "^6.4.1",
